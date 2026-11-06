@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#F5F5F7">
+  <title>Analytics Flow</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="style.css">
+  <script src="xlsx.full.min.js"></script>
+</head>
+<body>
+  <!-- AuthGate: монтируется первым, до DB -->
+  <div id="auth-gate" class="auth-gate"></div>
+
+  <!-- Приложение: скрыто, пока PIN не введён -->
+  <div class="app hidden" id="app">
+    <header class="app-header" id="app-header"></header>
+    <main id="screen" class="screen"></main>
+    <nav id="nav" class="bottom-nav"></nav>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+  <div id="modal-root" class="modal-root"></div>
+
+  <script type="module" src="crypto.js"></script>
+  <script type="module" src="auth.js"></script>
+</body>
+</html>
