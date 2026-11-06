@@ -1,6 +1,5 @@
 /* ==========================================
    APP ROUTER
-   App.start(dataKey) — вызывается после PIN.
    ========================================== */
 
 const App = {
@@ -22,13 +21,18 @@ const App = {
 
   async start(dataKey) {
     this.dataKey = dataKey;
-    await DB.init(dataKey);
-    this.renderHeader();
-    this.renderNav();
-    if (!DB.getStores().length) {
-      this.route('stores');
-    } else {
-      this.route('home');
+    try {
+      await DB.init(dataKey);
+      this.renderHeader();
+      this.renderNav();
+      if (!DB.getStores().length) {
+        this.route('stores');
+      } else {
+        this.route('home');
+      }
+    } catch (err) {
+      console.error('App start error:', err);
+      document.getElementById('screen').innerHTML = `<div class="empty-state"><h2>Ошибка загрузки</h2><p>${UI.escape(err.message)}</p></div>`;
     }
   },
 
@@ -41,7 +45,7 @@ const App = {
     }
     header.innerHTML = `
       <button class="store-switch" id="store-switch">
-        <span>🏬 ${store.name}</span>
+        <span>🏬 ${UI.escape(store.name)}</span>
         <span>▾</span>
       </button>
       <div style="width: 40px"></div>
@@ -58,9 +62,7 @@ const App = {
       <div class="modal-title">Магазины</div>
       ${stores.map(s => `
         <div class="list-item" onclick="window.App.switchStore('${s.id}')" style="cursor:pointer">
-          <div>
-            <div class="item-name">${UI.escape(s.name)} ${s.id === current.id ? '✓' : ''}</div>
-          </div>
+          <div class="item-name">${UI.escape(s.name)} ${s.id === current.id ? '✓' : ''}</div>
         </div>
       `).join('')}
       <button class="btn btn-secondary" style="margin-top:16px" onclick="window.App.route('stores')">Управление магазинами</button>
@@ -99,7 +101,6 @@ const App = {
     const root = document.getElementById('screen');
     root.innerHTML = '';
 
-    // Проверка магазина
     const store = DB.getCurrentStore();
     if (!store && screen !== 'stores') {
       this.route('stores');
@@ -107,20 +108,19 @@ const App = {
     }
 
     try {
-      if (screen === 'stores') await Screens.stores(root);
-      if (screen === 'home') await Screens.home(root);
-      if (screen === 'analytics') await Screens.analytics(root);
-      if (screen === 'rails') await Screens.rails(root);
-      if (screen === 'settings') await Screens.settings(root);
+      if (screen === 'stores' && Screens.stores) await Screens.stores(root);
+      if (screen === 'home' && Screens.home) await Screens.home(root);
+      if (screen === 'analytics' && Screens.analytics) await Screens.analytics(root);
+      if (screen === 'rails' && Screens.rails) await Screens.rails(root);
+      if (screen === 'settings' && Screens.settings) await Screens.settings(root);
     } catch (err) {
-      console.error(err);
-      root.innerHTML = `<div class="empty-state"><h2>Ошибка</h2><p>${UI.escape(err.message)}</p></div>`;
+      console.error('Route error:', err);
+      root.innerHTML = `<div class="empty-state"><h2>Ошибка экрана</h2><p>${UI.escape(err.message)}</p></div>`;
     }
     window.scrollTo(0, 0);
   },
 };
 
-// ---------- UI UTILS (глобальные) ----------
 const UI = {
   toast(msg, type = 'default') {
     const el = document.createElement('div');
@@ -130,39 +130,17 @@ const UI = {
     requestAnimationFrame(() => el.classList.add('show'));
     setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3000);
   },
-
   modal(html) {
     const root = document.getElementById('modal-root');
     root.innerHTML = `<div class="modal-content">${html}</div>`;
     root.classList.add('open');
-    root.addEventListener('click', (e) => {
-      if (e.target === root) this.closeModal();
-    });
+    root.addEventListener('click', (e) => { if (e.target === root) this.closeModal(); });
   },
-
-  closeModal() {
-    document.getElementById('modal-root').classList.remove('open');
-  },
-
-  escape(s) {
-    return String(s ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  },
-
-  fmt(n) {
-    return Math.round(n || 0).toLocaleString('ru-RU');
-  },
-
-  fmtPct(n) {
-    return (n || 0).toFixed(1) + '%';
-  },
+  closeModal() { document.getElementById('modal-root').classList.remove('open'); },
+  escape(s) { return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); },
+  fmt(n) { return Math.round(n || 0).toLocaleString('ru-RU'); },
+  fmtPct(n) { return (n || 0).toFixed(1) + '%'; },
 };
 
 window.App = App;
 window.UI = UI;
-
-// ---------- BOOTSTRAP hook ----------
-// Auth.js вызывает window.App.start(dataKey) после успешного PIN
