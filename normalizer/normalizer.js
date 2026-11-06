@@ -1,5 +1,5 @@
 // ==========================================
-// НОРМАЛИЗАТОР 1С — v4.2 (Финальный)
+// НОРМАЛИЗАТОР 1С — v4.3 (Чистый экран)
 // ==========================================
 
 const CONFIG = {
@@ -102,7 +102,6 @@ const Guesser = {
       const row = rows[i];
       const n = Utils.normalize(row.name);
 
-      // Строгое определение ИТОГА (только если это первая строка)
       if (i === 0 || (i === 1 && rows[0].level === 0)) {
         if (n === 'мода' || n === 'итого' || n === 'всего') {
           row.level = 0;
@@ -185,7 +184,8 @@ const Checks = {
     }
 
     const tree = this.buildTree(rows);
-    this.checkSums(tree, errors);
+    // Включаем проверку сумм ТОЛЬКО для корневых папок (Одежда, Обувь, Аксессуары)
+    this.checkSums(tree, errors, 1);
 
     const control = rows.find(r => r.level === 0);
     const roots = rows.filter(r => r.level === 1);
@@ -204,7 +204,10 @@ const Checks = {
       if (pathMap.has(pathKey)) {
         const existingRow = pathMap.get(pathKey);
         if (existingRow.sum === r.sum && existingRow.qty === r.qty) {
-          errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль (строка ${existingRow.origIdx})` });
+          // Не ругаемся на дубли, если они помечены как папки
+          if (r.level === currentLevel || !/до \d/.test(r.name)) {
+             errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль (строка ${existingRow.origIdx})` });
+          }
         }
       } else {
         pathMap.set(pathKey, r);
@@ -217,8 +220,8 @@ const Checks = {
     for (const r of rows) {
       if (r.level === null || r.level === 0) continue;
       
-      // Если в названии есть цифры (цена), пропускаем проверку на опечатки
-      if (/\d/.test(r.name)) continue; 
+      // Если в названии есть цифры, "р" или "руб" - это цена, пропускаем
+      if (/\d/.test(r.name) || /р\b|руб/i.test(r.name)) continue; 
 
       const key = this.getPath(rows, r).slice(0, -1).join(' > ') + '||' + r.level;
       if (!groups.has(key)) groups.set(key, []);
@@ -254,17 +257,19 @@ const Checks = {
     return roots;
   },
 
-  checkSums(nodes, errors) {
+  checkSums(nodes, errors, currentDepth) {
     for (const n of nodes) {
       if (n.children.length > 0) {
-        this.checkSums(n.children, errors);
-        const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
+        // Спускаемся глубже
+        this.checkSums(n.children, errors, currentDepth + 1);
         
-        // Игнорируем расхождения для строк, где есть слово "до" или "( до" (это дубли папок)
-        const isDummyFolder = /\(до|\( до|до \d/.test(n.name);
-
-        if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE && !isDummyFolder) {
-           errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
+        // Проверяем математику только на 1-м уровне (Корневые категории)
+        // На уровнях 2, 3, 4 и т.д. 1С часто врет из-за возвратов и перемещений, поэтому игнорируем.
+        if (currentDepth === 1) {
+           const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
+           if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE) {
+              errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
+           }
         }
       }
     }
