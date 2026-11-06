@@ -9,11 +9,12 @@ Screens.home = async function(root) {
   const current = DB.getCurrentImport(store.id);
 
   if (!current) {
+    // Если файлов нет — показываем экран загрузки
     root.innerHTML = `
       <div class="header"><h1 class="h1">Главная</h1></div>
       <div class="card empty-state">
         <h2>Нет данных</h2>
-        <p>Загрузите нормализованный файл Excel, чтобы увидеть аналитику</p>
+        <p>Загрузите Excel-файл, который мы сделали в нормализаторе</p>
         <input type="file" id="file-upload" accept=".xlsx" style="display:none">
         <button class="btn btn-primary" id="btn-upload">Загрузить Excel</button>
       </div>
@@ -22,6 +23,7 @@ Screens.home = async function(root) {
     return;
   }
 
+  // Если файл есть — показываем статистику
   const planKey = current.periodStart ? current.periodStart.slice(0, 7) : current.date.slice(0, 7);
   const plan = DB.getPlan(store.id, planKey);
   const planPct = plan > 0 ? Math.min(100, (current.totalSum / plan) * 100) : 0;
@@ -67,7 +69,6 @@ Screens.home = async function(root) {
 
 function renderTopCategories(roots) {
   if (!roots || !roots.length) return '<p class="item-desc">Нет данных</p>';
-  // Берем корневые категории (уровень 1)
   return roots.slice(0, 10).map(r => `
     <div class="list-item">
       <div>
@@ -94,6 +95,7 @@ function setupUpload(root) {
     try {
       const store = DB.getCurrentStore();
       const imp = await Parser.parse(file, store.id);
+      
       if (!imp.valid && imp.errorMsg) {
         UI.toast(`Ошибка: итог ${imp.errorMsg.control} ≠ сумма ${imp.errorMsg.roots}`, 'error');
       } else {
