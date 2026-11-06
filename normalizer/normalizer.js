@@ -1,5 +1,5 @@
 // ==========================================
-// НОРМАЛИЗАТОР 1С — v4.3 (Чистый экран)
+// НОРМАЛИЗАТОР 1С — v5.0 (Игнорирование косяков 1С)
 // ==========================================
 
 const CONFIG = {
@@ -184,8 +184,7 @@ const Checks = {
     }
 
     const tree = this.buildTree(rows);
-    // Включаем проверку сумм ТОЛЬКО для корневых папок (Одежда, Обувь, Аксессуары)
-    this.checkSums(tree, errors, 1);
+    this.checkRootSums(tree, errors); // Проверяем только корни (Одежда, Обувь)
 
     const control = rows.find(r => r.level === 0);
     const roots = rows.filter(r => r.level === 1);
@@ -197,17 +196,15 @@ const Checks = {
       }
     }
     
+    // Проверяем на дубли ТОЛЬКО если это Папка (уровень < 4)
     const pathMap = new Map();
     for (const r of rows) {
       if (r.level === null || r.level === 0) continue;
       const pathKey = this.getPath(rows, r).join(' > ');
       if (pathMap.has(pathKey)) {
         const existingRow = pathMap.get(pathKey);
-        if (existingRow.sum === r.sum && existingRow.qty === r.qty) {
-          // Не ругаемся на дубли, если они помечены как папки
-          if (r.level === currentLevel || !/до \d/.test(r.name)) {
-             errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль (строка ${existingRow.origIdx})` });
-          }
+        if (existingRow.sum === r.sum && existingRow.qty === r.qty && r.level < 4) {
+          errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль папки (строка ${existingRow.origIdx})` });
         }
       } else {
         pathMap.set(pathKey, r);
@@ -234,10 +231,14 @@ const Checks = {
           const a = group[i], b = group[j];
           const na = Utils.normalize(a.name), nb = Utils.normalize(b.name);
           if (na === nb) continue;
+          
+          // Если длина слов сильно отличается, это не опечатка
+          if (Math.abs(na.length - nb.length) > 2) continue; 
+
           const dist = Utils.levenshtein(na, nb);
           const threshold = Math.min(na.length, nb.length) < 5 ? CONFIG.LEVENSHTEIN_SHORT : CONFIG.LEVENSHTEIN_LONG;
           
-          if (dist <= threshold && Math.abs(na.length - nb.length) <= 1) {
+          if (dist <= threshold) {
             warnings.push({ row: b.origIdx, msg: `Строка ${b.origIdx}: «${b.name}» похоже на «${a.name}» (опечатка?)` });
           }
         }
@@ -257,20 +258,13 @@ const Checks = {
     return roots;
   },
 
-  checkSums(nodes, errors, currentDepth) {
+  checkRootSums(nodes, errors) {
     for (const n of nodes) {
-      if (n.children.length > 0) {
-        // Спускаемся глубже
-        this.checkSums(n.children, errors, currentDepth + 1);
-        
-        // Проверяем математику только на 1-м уровне (Корневые категории)
-        // На уровнях 2, 3, 4 и т.д. 1С часто врет из-за возвратов и перемещений, поэтому игнорируем.
-        if (currentDepth === 1) {
-           const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
-           if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE) {
-              errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
-           }
-        }
+      // Проверяем математику ТОЛЬКО у Корневых папок (Одежда, Обувь, Аксессуары)
+      // На уровнях ниже 1С часто врет из-за возвратов и перемещений, поэтому мы это игнорируем.
+      const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
+      if (sumChildren > 0 && Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE) {
+         errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
       }
     }
   },
