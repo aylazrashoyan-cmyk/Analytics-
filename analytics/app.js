@@ -131,11 +131,10 @@ const UI = {
 };
 
 // ==========================================
-// ЭКРАНЫ ПРИЛОЖЕНИЯ (ВШИТЫ СЮДА)
+// ЭКРАНЫ ПРИЛОЖЕНИЯ
 // ==========================================
 const Screens = {};
 
-// 1. МАГАЗИНЫ
 Screens.stores = async function(root) {
   const stores = DB.getStores();
   const current = DB.getCurrentStore();
@@ -212,7 +211,6 @@ Screens.stores = async function(root) {
   });
 };
 
-// 2. ГЛАВНАЯ
 Screens.home = async function(root) {
   const store = DB.getCurrentStore();
   const current = DB.getCurrentImport(store.id);
@@ -299,7 +297,6 @@ function setupUpload(root) {
   });
 }
 
-// 3. АНАЛИТИКА (Заглушка)
 Screens.analytics = async function(root) {
   root.innerHTML = `
     <div class="header"><h1 class="h1">Аналитика</h1></div>
@@ -307,7 +304,6 @@ Screens.analytics = async function(root) {
   `;
 };
 
-// 4. РЕЙЛЫ (Заглушка)
 Screens.rails = async function(root) {
   root.innerHTML = `
     <div class="header"><h1 class="h1">Рейлы</h1></div>
@@ -315,7 +311,6 @@ Screens.rails = async function(root) {
   `;
 };
 
-// 5. НАСТРОЙКИ
 Screens.settings = async function(root) {
   const store = DB.getCurrentStore();
   const current = DB.getCurrentImport(store.id);
