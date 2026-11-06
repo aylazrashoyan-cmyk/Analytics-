@@ -1,5 +1,5 @@
 // ==========================================
-// НОРМАЛИЗАТОР 1С — v5.0 (Игнорирование косяков 1С)
+// НОРМАЛИЗАТОР 1С — v7.0 (Строгая математика)
 // ==========================================
 
 const CONFIG = {
@@ -178,13 +178,14 @@ const Checks = {
     for (const r of marked) {
       if (r.level === 0) continue;
       if (prev && prev.level !== 0 && r.level > prev.level + 1) {
-        errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: уровень ${r.level}, предыдущий ${prev.level} — пропуск` });
+        errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: уровень ${r.level}, предыдущий ${prev.level} — пропуск уровня` });
       }
       prev = r;
     }
 
+    // СТРОГАЯ ПРОВЕРКА СУММ (возвращена в ошибки!)
     const tree = this.buildTree(rows);
-    this.checkRootSums(tree, errors); // Проверяем только корни (Одежда, Обувь)
+    this.checkSums(tree, errors);
 
     const control = rows.find(r => r.level === 0);
     const roots = rows.filter(r => r.level === 1);
@@ -196,15 +197,14 @@ const Checks = {
       }
     }
     
-    // Проверяем на дубли ТОЛЬКО если это Папка (уровень < 4)
     const pathMap = new Map();
     for (const r of rows) {
       if (r.level === null || r.level === 0) continue;
       const pathKey = this.getPath(rows, r).join(' > ');
       if (pathMap.has(pathKey)) {
         const existingRow = pathMap.get(pathKey);
-        if (existingRow.sum === r.sum && existingRow.qty === r.qty && r.level < 4) {
-          errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль папки (строка ${existingRow.origIdx})` });
+        if (existingRow.sum === r.sum && existingRow.qty === r.qty) {
+          errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль (строка ${existingRow.origIdx})` });
         }
       } else {
         pathMap.set(pathKey, r);
@@ -216,10 +216,6 @@ const Checks = {
     const groups = new Map();
     for (const r of rows) {
       if (r.level === null || r.level === 0) continue;
-      
-      // Если в названии есть цифры, "р" или "руб" - это цена, пропускаем
-      if (/\d/.test(r.name) || /р\b|руб/i.test(r.name)) continue; 
-
       const key = this.getPath(rows, r).slice(0, -1).join(' > ') + '||' + r.level;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(r);
@@ -232,17 +228,26 @@ const Checks = {
           const na = Utils.normalize(a.name), nb = Utils.normalize(b.name);
           if (na === nb) continue;
           
-          // Если длина слов сильно отличается, это не опечатка
-          if (Math.abs(na.length - nb.length) > 2) continue; 
+          const textA = na.replace(/\d+/g, '').replace(/р\b|руб/g, '').trim();
+          const textB = nb.replace(/\d+/g, '').replace(/р\b|руб/g, '').trim();
 
-          const dist = Utils.levenshtein(na, nb);
-          const threshold = Math.min(na.length, nb.length) < 5 ? CONFIG.LEVENSHTEIN_SHORT : CONFIG.LEVENSHTEIN_LONG;
+          if (!textA || !textB) continue;
+
+          const dist = Utils.levenshtein(textA, textB);
+          const threshold = Math.max(1, Math.floor(Math.max(textA.length, textB.length) * 0.2));
           
-          if (dist <= threshold) {
+          if (dist > 0 && dist <= threshold) {
             warnings.push({ row: b.origIdx, msg: `Строка ${b.origIdx}: «${b.name}» похоже на «${a.name}» (опечатка?)` });
           }
         }
       }
+    }
+    
+    for (const r of rows) {
+      if (Utils.hasTrailingSpace(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — пробел в начале/конце` });
+      if (Utils.hasDoubleSpace(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — двойной пробел` });
+      if (Utils.hasInvisible(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — невидимый символ` });
+      if (Utils.hasLatin(r.name) && Utils.hasCyrillic(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — латинские буквы в русском` });
     }
   },
 
@@ -258,13 +263,18 @@ const Checks = {
     return roots;
   },
 
-  checkRootSums(nodes, errors) {
+  checkSums(nodes, errors) {
     for (const n of nodes) {
-      // Проверяем математику ТОЛЬКО у Корневых папок (Одежда, Обувь, Аксессуары)
-      // На уровнях ниже 1С часто врет из-за возвратов и перемещений, поэтому мы это игнорируем.
-      const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
-      if (sumChildren > 0 && Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE) {
-         errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
+      if (n.children.length > 0) {
+        this.checkSums(n.children, errors);
+        const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
+        
+        // Игнорируем дубли папок (со словом "до")
+        const isDummyFolder = /\(до|\( до|до \d/.test(n.name);
+
+        if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE && !isDummyFolder) {
+           errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
+        }
       }
     }
   },
@@ -317,7 +327,7 @@ const App = {
       document.getElementById('screen-upload').hidden = true;
       document.getElementById('screen-work').hidden = false;
       document.getElementById('file-name').textContent = file.name;
-      document.getElementById('file-meta').textContent = `Строк: ${rows.length} · Удалено: ${removed.length}`;
+      document.getElementById('file-meta').textContent = `Строк: ${rows.length} · Удалено мусора: ${removed.length}`;
       this.renderTable();
       this.check();
       if (removed.length > 0) this.showRemoved();
@@ -342,27 +352,36 @@ const App = {
   updateName(i, val) { this.state.rows[i].name = val.trim(); this.check(); },
   updateQty(i, val) { this.state.rows[i].qty = val === '' ? null : parseFloat(val); this.check(); },
   updateSum(i, val) { this.state.rows[i].sum = val === '' ? null : parseFloat(val); this.check(); },
-  deleteRow(i) { if (confirm('Удалить?')) { this.state.rows.splice(i, 1); this.renderTable(); this.check(); } },
+  deleteRow(i) { if (confirm('Удалить эту строку?')) { this.state.rows.splice(i, 1); this.renderTable(); this.check(); } },
+  
   check() {
     const { errors, warnings, infos } = Checks.all(this.state.rows);
+    
     document.getElementById('stat-err').textContent = `🔴 ${errors.length}`;
     document.getElementById('stat-warn').textContent = `🟡 ${warnings.length}`;
     document.getElementById('stat-info').textContent = `🔵 ${infos.length}`;
+    
     const panel = document.getElementById('issues-panel');
     panel.innerHTML = [
-      ...errors.map(e => `<div class="issue error" onclick="App.scrollToRow(${e.row})"><span>🔴</span><span class="issue-text">${e.msg}</span></div>`),
-      ...warnings.map(w => `<div class="issue warn" onclick="App.scrollToRow(${w.row})"><span>🟡</span><span class="issue-text">${w.msg}</span></div>`),
-      ...infos.map(i => `<div class="issue info" onclick="App.scrollToRow(${i.row})"><span>🔵</span><span class="issue-text">${i.msg}</span></div>`)
+      ...errors.map(e => `<div class="issue error" onclick="App.scrollToRow(${e.row})"><span class="issue-icon">🔴</span><span class="issue-text"><b>Ошибка:</b> ${e.msg}</span></div>`),
+      ...warnings.map(w => `<div class="issue warn" onclick="App.scrollToRow(${w.row})"><span class="issue-icon">🟡</span><span class="issue-text">${w.msg}</span></div>`),
+      ...infos.map(i => `<div class="issue info" onclick="App.scrollToRow(${i.row})"><span class="issue-icon">🔵</span><span class="issue-text">${i.msg}</span></div>`)
     ].join('');
+    
+    // Кнопка Скачать блокируется, если есть ЛЮБЫЕ красные ошибки (математика не бьется)
     document.getElementById('btn-export').disabled = errors.length > 0;
+    
     document.querySelectorAll('.edit-table tr').forEach(tr => tr.classList.remove('row-error', 'row-warn'));
     errors.forEach(e => { const tr = document.getElementById('row-' + e.row); if (tr) tr.classList.add('row-error'); });
     warnings.forEach(w => { const tr = document.getElementById('row-' + w.row); if (tr) tr.classList.add('row-warn'); });
   },
+  
   scrollToRow(origIdx) { if (!origIdx) return; const tr = document.getElementById('row-' + origIdx); if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' }); },
+  
   showRemoved() {
     document.getElementById('modal-content').innerHTML = `
-      <h2>Удалено (${this.state.removed.length})</h2>
+      <h2>Удалённые строки (${this.state.removed.length})</h2>
+      <p>Эти строки не попали в таблицу, так как являются мусором или служебными заголовками 1С.</p>
       <ul style="max-height: 40vh; overflow-y: auto; padding-left: 20px; margin-bottom: 20px;">
         ${this.state.removed.map(r => `<li>Стр. ${r.idx}: ${r.name} <br><small>${r.reason}</small></li>`).join('')}
       </ul>
@@ -370,6 +389,7 @@ const App = {
     `;
     document.getElementById('modal-root').classList.add('open');
   },
+  
   export() {
     const data = this.state.rows.map(r => [r.level, r.name, r.qty, r.sum]);
     const ws = XLSX.utils.aoa_to_sheet(data);
