@@ -1,91 +1,67 @@
-/* ==========================================
-   НОРМАЛИЗАТОР 1С
-   Вход: сырой xlsx из 1С
-   Выход: чистый xlsx (уровень | имя | кол-во | сумма)
-   ========================================== */
+// ==========================================
+// НОРМАЛИЗАТОР 1С — v1.1 (Полный код)
+// ==========================================
 
-// ---------- STATE ----------
-const State = {
-  rows: [],        // { id, level, name, qty, sum, raw, flags: [] }
-  removed: [],     // удалённый мусор
-  issues: { errors: [], warnings: [], infos: [] },
-  fileName: '',
+const CONFIG = {
+  LEVENSHTEIN_SHORT: 1, 
+  LEVENSHTEIN_LONG: 2, 
+  SUM_TOLERANCE: 1, 
+  BIG_SUM_MULTIPLIER: 5,
+  GARBAGE_NAMES: ['номенклатура', 'отбор', 'итого', 'мода', 'всего', 'продажи', 'магазин', 'склад', 'торговый зал'],
 };
 
-// ---------- UTILS ----------
+// ==========================================
+// УТИЛИТЫ
+// ==========================================
 const Utils = {
-  normalize(s) {
-    return String(s ?? '')
-      .toLowerCase()
-      .replace(/ё/g, 'е')
-      .replace(/\u00A0/g, ' ')
-      .trim();
-  },
-
-  trimInvisible(s) {
-    return String(s ?? '')
-      .replace(/\u00A0/g, ' ')
-      .replace(/[\u200B-\u200D\uFEFF]/g, '')
-      .trim();
-  },
-
-  hasLatin(s) {
-    return /[a-zA-Z]/.test(String(s ?? ''));
-  },
-
-  hasCyrillic(s) {
-    return /[а-яА-Я]/.test(String(s ?? ''));
-  },
-
-  hasMixedScript(s) {
-    return this.hasLatin(s) && this.hasCyrillic(s);
-  },
-
-  hasInvisible(s) {
-    return /[\u00A0\u200B-\u200D\uFEFF]/.test(String(s ?? ''));
-  },
-
-  hasTrailingSpace(s) {
-    return /\s$/.test(String(s ?? '')) || /^\s/.test(String(s ?? ''));
-  },
-
-  levenshtein(a, b) {
-    a = String(a); b = String(b);
-    if (a === b) return 0;
-    if (!a.length) return b.length;
-    if (!b.length) return a.length;
-    const prev = new Array(b.length + 1);
-    for (let j = 0; j <= b.length; j++) prev[j] = j;
-    for (let i = 1; i <= a.length; i++) {
-      let curr = [i];
-      for (let j = 1; j <= b.length; j++) {
-        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-        curr[j] = Math.min(
-          curr[j - 1] + 1,
-          prev[j] + 1,
-          prev[j - 1] + cost
-        );
-      }
-      for (let j = 0; j <= b.length; j++) prev[j] = curr[j];
-    }
-    return prev[b.length];
-  },
-
   toNum(v) {
     if (v === null || v === undefined || v === '') return null;
-    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (typeof v === 'number') return v;
     const cleaned = String(v).replace(/[\s\u00A0]/g, '').replace(',', '.');
     const n = parseFloat(cleaned);
     return Number.isFinite(n) ? n : null;
   },
-
-  fmtSum(n) {
-    if (n === null || n === undefined) return '';
-    return Math.round(n).toLocaleString('ru-RU');
+  normalize(s) { 
+    return String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim(); 
+  },
+  hasLatin(s) { return /[a-zA-Z]/.test(String(s || '')); },
+  hasCyrillic(s) { return /[а-яА-ЯёЁ]/.test(String(s || '')); },
+  hasInvisible(s) { return /[\u00A0\u200B\uFEFF\u2007\u202F]/.test(String(s || '')); },
+  hasTrailingSpace(s) { return /^\s|\s$/.test(String(s || '')); },
+  hasDoubleSpace(s) { return /\s{2,}/.test(String(s || '')); },
+  
+  levenshtein(a, b) {
+    a = String(a || ''); b = String(b || '');
+    if (a === b) return 0;
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const matrix = Array.from({ length: b.length + 1 }, (_, i) => [i]);
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= b.length; i++) {
+      for (let j = 1; j <= a.length; j++) {
+        const cost = a[j - 1] === b[i - 1] ? 0 : 1;
+        matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost);
+      }
+    }
+    return matrix[b.length][a.length];
+  },
+  
+  median(nums) {
+    const arr = nums.filter(n => Number.isFinite(n)).sort((a, b) => a - b);
+    if (!arr.length) return 0;
+    const mid = Math.floor(arr.length / 2);
+    return arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2;
+  },
+  
+  isGarbageName(name) {
+    const n = Utils.normalize(name);
+    return CONFIG.GARBAGE_NAMES.some(g => n === g || n.startsWith(g + ' ') || n.startsWith(g + ':'));
   },
 };
 
-// ---------- READ ----------
+// ==========================================
+// ЧТЕНИЕ ФАЙЛА
+// ==========================================
 const Reader = {
   read(file) {
     return new Promise((resolve, reject) => {
@@ -94,638 +70,482 @@ const Reader = {
         try {
           const wb = XLSX.read(e.target.result, { type: 'array', cellStyles: true });
           const sheet = wb.Sheets[wb.SheetNames[0]];
-          const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true });
-          resolve(rows);
-        } catch (err) { reject(err); }
+          const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true });
+          resolve({ raw, sheetName: wb.SheetNames[0] });
+        } catch (err) { 
+          reject(err); 
+        }
       };
-      reader.onerror = () => reject(new Error('FileReader error'));
+      reader.onerror = () => reject(new Error('Ошибка чтения файла'));
       reader.readAsArrayBuffer(file);
     });
   },
 };
 
-// ---------- CLEAN ----------
+// ==========================================
+// ОЧИСТКА
+// ==========================================
 const Cleaner = {
-  // Известный мусор — удаляем автоматом
-  KNOWN_JUNK: [
-    /^номенклатура$/i,
-    /^отбор[:\s]/i,
-    /^количество товаров$/i,
-    /^сумма продаж/i,
-    /^итого$/i,        // контрольную строку сохраняем отдельно
-    /^всего$/i,
-    /^мода$/i,
-  ],
-
-  clean(rawRows) {
-    const out = [];
-    const removed = [];
-    let controlRow = null;
-
-    for (let i = 0; i < rawRows.length; i++) {
-      const r = rawRows[i] || [];
-      const a = r[0];
-      const b = r[1] ?? null;
-      const c = r[2] ?? null;
-      const d = r[3] ?? null;
-      const e = r[4] ?? null;
-
-      // Пустая строка
-      if (a === null && b === null && c === null && d === null && e === null) {
-        continue;
+  clean(raw) {
+    const removed = []; 
+    const rows = [];
+    
+    for (let i = 0; i < raw.length; i++) {
+      const r = raw[i] || [];
+      const nameRaw = r[0];
+      const name = nameRaw == null ? '' : String(nameRaw).trim();
+      
+      if (!name) { 
+        removed.push({ idx: i + 1, name: '(пусто)', reason: 'пустая строка' }); 
+        continue; 
       }
-      if (String(a ?? '').trim() === '' && String(b ?? '').trim() === '') continue;
-
-      const name = Utils.trimInvisible(a);
-      if (!name) { continue; }
-
-      // Контрольная строка «Итого» / «Мода» / «Всего»
-      if (/^(итого|всего|мода)$/i.test(name)) {
-        // определяем, где сумма: в 4-й или 5-й колонке
-        const sumVal = Utils.toNum(e) ?? Utils.toNum(d) ?? Utils.toNum(c) ?? Utils.toNum(b);
-        const qtyVal = Utils.toNum(d) ?? Utils.toNum(c);
-        controlRow = { name, qty: qtyVal, sum: sumVal, rawIdx: i };
-        removed.push({ idx: i + 1, name, reason: 'контрольная строка → перенесена вниз' });
+      
+      const normName = Utils.normalize(name);
+      const isControl = ['итого', 'мода', 'всего'].includes(normName);
+      
+      if (Utils.isGarbageName(name) && !isControl) {
+        removed.push({ idx: i + 1, name, reason: 'служебная строка' }); 
         continue;
       }
 
-      // Известный мусор
-      let isJunk = false;
-      for (const re of this.KNOWN_JUNK) {
-        if (re.test(name)) { isJunk = true; break; }
-      }
-      if (isJunk) {
-        removed.push({ idx: i + 1, name, reason: 'известный мусор' });
-        continue;
-      }
-
-      // Определяем колонки: qty и sum.
-      // В 1С: A=имя, B=пусто, C=кол-во, D=сумма, E=сумма без скидки
-      // Или: A=имя, B=кол-во, C=сумма
-      // Пытаемся найти: имя в A, два числа в оставшихся
       let qty = null, sum = null;
-      const nums = [b, c, d, e].map(v => Utils.toNum(v)).filter(v => v !== null);
-      // Если в строке 3 числа (b,c,d,e) — берём предпоследнее как qty, последнее как sum
-      // Но точнее: ищем по позициям. В нашем случае:
-      //   c = qty, d = sum, e = sum без скидки
-      // Если e заполнено и d заполнено — берём d (сумма со скидкой) или e?
-      // В файле 1С: D = «Количество товаров» по шапке? Нет:
-      //   шапка: A=Номенклатура, D=Количество товаров, E=Сумма продаж без скидки
-      //   значит qty в D (индекс 3), sum в E (индекс 4)
-      // Но у нас в данных: «Одежда | | | 152 | 182298» → c=null? Нет:
-      //   row = [a, b, c, d, e] = [«Одежда», null, null, 152, 182298]
-      //   т.е. qty в d (индекс 3), sum в e (индекс 4)
-      // Проверим: у папок qty null, sum есть. У листьев qty есть, sum есть.
-      // Универсально: qty = первое число, sum = второе число (если оба есть)
-      // Если одно число — это sum (у папок), qty = null
-      const rawQty = Utils.toNum(d);  // D
-      const rawSum = Utils.toNum(e);  // E
-      if (rawSum !== null) {
-        qty = rawQty;
-        sum = rawSum;
-      } else {
-        // fallback: если E пусто, пробуем C/D
-        const cNum = Utils.toNum(c);
-        const dNum = Utils.toNum(d);
-        if (dNum !== null && cNum === null) { sum = dNum; qty = null; }
-        else if (cNum !== null && dNum !== null) { qty = cNum; sum = dNum; }
-        else if (dNum !== null && cNum !== null) { qty = dNum; sum = null; }
-        else if (cNum !== null && dNum === null) { sum = cNum; qty = null; }
-        else { sum = null; qty = null; }
+      const nums = [];
+      
+      // Ищем числа в строке: предпоследнее считаем кол-вом, последнее - суммой
+      for (let c = 1; c < r.length; c++) {
+        const v = Utils.toNum(r[c]);
+        if (v !== null) nums.push({ col: c, val: v });
+      }
+      
+      if (nums.length >= 2) { 
+        qty = nums[nums.length - 2].val; 
+        sum = nums[nums.length - 1].val; 
+      } else if (nums.length === 1) { 
+        sum = nums[0].val; 
       }
 
-      // Если ни qty, ни sum — возможно, это тоже мусор
-      if (qty === null && sum === null) {
-        removed.push({ idx: i + 1, name, reason: 'нет чисел (ни кол-ва, ни суммы)' });
+      // Если нет ни суммы, ни кол-ва — это мусор
+      if (sum === null && qty === null) {
+        removed.push({ idx: i + 1, name, reason: 'нет суммы и кол-ва' }); 
         continue;
       }
 
-      out.push({
-        id: out.length,
-        level: null,           // заполним в guessLevels
-        name,
-        qty,
-        sum,
-        rawIdx: i,
-        flags: [],
+      rows.push({ 
+        id: 'row_' + i, 
+        origIdx: i + 1, 
+        name, 
+        qty, 
+        sum, 
+        level: null 
       });
     }
-
-    // Контрольную строку добавляем в конец (уровень 0)
-    if (controlRow) {
-      out.push({
-        id: out.length,
-        level: 0,
-        name: controlRow.name || 'ИТОГО',
-        qty: controlRow.qty,
-        sum: controlRow.sum,
-        rawIdx: controlRow.rawIdx,
-        flags: [],
-        isControl: true,
-      });
-    }
-
-    return { rows: out, removed };
+    return { rows, removed };
   },
 };
 
-// ---------- GUESS ----------
+// ==========================================
+// АВТОУГАДЫВАНИЕ УРОВНЕЙ
+// ==========================================
 const Guesser = {
   guess(rows) {
-    // Эвристики:
-    // 1. Листья (есть qty и sum) → уровень 3
-    // 2. Папки (только sum, без qty) → null (разметить вручную)
-    // 3. Контрольная → 0 (уже стоит)
-    // 4. Если имя похоже на «Мужская/Женская/Детская/Девочки/Мальчики» → уровень 2
-    // 5. Корневые (Одежда/Обувь/Аксессуары/Распродажа) → уровень 1
-
-    const ROOT_HINTS = /^(одежда|обувь|аксессуары|распродажа)$/i;
-    const SUB_HINTS = /^(мужская|женская|детская|девочки|мальчики|унисекс)$/i;
-
     for (const row of rows) {
-      if (row.isControl) { row.level = 0; continue; }
-      if (row.level !== null) continue; // уже размечено
-
-      const norm = Utils.normalize(row.name);
-
-      if (ROOT_HINTS.test(norm)) { row.level = 1; continue; }
-      if (SUB_HINTS.test(norm)) { row.level = 2; continue; }
-
-      if (row.qty !== null && row.sum !== null) {
-        row.level = 3; // лист
-      } else if (row.sum !== null && row.qty === null) {
-        row.level = null; // папка — разметить вручную
-      } else {
-        row.level = null;
+      const n = Utils.normalize(row.name);
+      
+      if (['итого', 'мода', 'всего'].includes(n)) { 
+        row.level = 0; 
+        continue; 
+      }
+      
+      // Если есть кол-во и сумма > 0, это лист (товар)
+      if (row.qty !== null && row.sum !== null && row.qty > 0) { 
+        row.level = 3; 
+      } else { 
+        row.level = null; // Папка — разметить вручную
       }
     }
+    return rows;
   },
 };
 
-// ---------- CHECKS ----------
+// ==========================================
+// ПРОВЕРКИ (ВАЛИДАЦИЯ)
+// ==========================================
 const Checks = {
-  run(rows) {
-    const errors = [];
-    const warnings = [];
+  all(rows) {
+    const errors = []; 
+    const warnings = []; 
     const infos = [];
-
-    // Разбиваем на «дерево» по уровням для проверок
-    const nonControl = rows.filter(r => !r.isControl);
-    const control = rows.find(r => r.isControl);
-
-    // ---- 1. Первый уровень должен быть 1 ----
-    const firstWithLevel = nonControl.find(r => r.level !== null);
-    if (firstWithLevel && firstWithLevel.level !== 1) {
-      errors.push({
-        rowId: firstWithLevel.id,
-        text: `Строка ${firstWithLevel.id + 1}: первый уровень = ${firstWithLevel.level}, ожидался 1 (корень)`,
-      });
-    }
-
-    // ---- 2. Пропущен уровень ----
-    let prevLevel = 0;
-    for (let i = 0; i < nonControl.length; i++) {
-      const row = nonControl[i];
-      if (row.level === null) continue; // не размечено — пропускаем (это не ошибка, а «надо разметить»)
-      if (row.level > prevLevel + 1) {
-        errors.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: уровень ${row.level}, а предыдущий ${prevLevel} — пропущен уровень ${prevLevel + 1}`,
-        });
-      }
-      prevLevel = row.level;
-    }
-
-    // ---- 3. Неразмеченные папки ----
-    const unset = nonControl.filter(r => r.level === null);
-    if (unset.length) {
-      errors.push({
-        rowId: unset[0].id,
-        text: `Не размечено уровней: ${unset.length} строк. Проставь уровень в таблице.`,
-      });
-    }
-
-    // ---- 4. Сумма детей ≠ родитель ----
-    // Строим дерево по уровням
-    const tree = this.buildTree(nonControl);
-    this.checkSums(tree, errors, warnings);
-
-    // ---- 5. Итого ≠ сумма корней ----
-    if (control) {
-      const rootsSum = tree.reduce((acc, n) => acc + (n.row.sum || 0), 0);
-      const diff = Math.abs(rootsSum - (control.sum || 0));
-      if (diff > 1) {
-        errors.push({
-          rowId: control.id,
-          text: `ИТОГО: ${Utils.fmtSum(control.sum)} ₽, а сумма корней ${Utils.fmtSum(rootsSum)} ₽ — расхождение ${Utils.fmtSum(diff)} ₽`,
-        });
-      } else {
-        infos.push({
-          rowId: control.id,
-          text: `ИТОГО сходится: ${Utils.fmtSum(control.sum)} ₽`,
-        });
-      }
-    } else {
-      warnings.push({
-        rowId: null,
-        text: `Нет контрольной строки (ИТОГО/Мода/Всего) — проверка сумм по корням недоступна`,
-      });
-    }
-
-    // ---- 6. Дубли имён под одним родителем ----
-    this.checkDuplicates(tree, errors, warnings);
-
-    // ---- 7. Опечатки (Левенштейн) ----
-    this.checkTypos(tree, warnings, infos);
-
-    // ---- 8. Отрицательные суммы ----
-    for (const row of nonControl) {
-      if (row.sum !== null && row.sum < 0) {
-        warnings.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: сумма отрицательная (${Utils.fmtSum(row.sum)} ₽)`,
-        });
-      }
-    }
-
-    // ---- 9. Кол-во у папки ----
-    for (const row of nonControl) {
-      if (row.level !== null && row.level < 3 && row.qty !== null && row.qty > 0) {
-        warnings.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: папка (уровень ${row.level}), но кол-во ${row.qty}`,
-        });
-      }
-    }
-
-    // ---- 10. Лист без суммы ----
-    for (const row of nonControl) {
-      if (row.level === 3 && row.sum === null) {
-        errors.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: лист (уровень 3), но сумма пустая`,
-        });
-      }
-    }
-
-    // ---- 11. Сумма 0 при кол-ве > 0 ----
-    for (const row of nonControl) {
-      if (row.qty !== null && row.qty > 0 && row.sum === 0) {
-        warnings.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: кол-во ${row.qty}, но сумма 0`,
-        });
-      }
-    }
-
-    // ---- 12. Латинские буквы ----
-    for (const row of nonControl) {
-      if (Utils.hasLatin(row.name)) {
-        warnings.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: есть латинские буквы`,
-        });
-      }
-    }
-
-    // ---- 13. Невидимые символы ----
-    for (const row of nonControl) {
-      if (Utils.hasInvisible(row.name)) {
-        warnings.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: невидимые символы (nbsp/zero-width)`,
-        });
-      }
-    }
-
-    // ---- 14. Пробелы по краям ----
-    for (const row of nonControl) {
-      if (Utils.hasTrailingSpace(row.name)) {
-        warnings.push({
-          rowId: row.id,
-          text: `Строка ${row.id + 1} «${row.name}»: пробел в начале или конце имени`,
-        });
-      }
-    }
-
+    
+    this.structure(rows, errors, warnings, infos);
+    this.typos(rows, errors, warnings, infos);
+    this.logic(rows, errors, warnings, infos);
+    
     return { errors, warnings, infos };
   },
 
+  structure(rows, errors, warnings, infos) {
+    const marked = rows.filter(r => r.level !== null);
+    
+    // 1. Первый уровень должен быть 1 или 0
+    if (marked.length > 0 && marked[0].level !== 0 && marked[0].level !== 1) {
+      errors.push({ 
+        row: marked[0].origIdx, 
+        msg: `Строка ${marked[0].origIdx}: уровень ${marked[0].level}, ожидался 1 или 0` 
+      });
+    }
+
+    // 2. Пропуск уровней
+    let prev = null;
+    for (const r of marked) {
+      if (r.level === 0) continue;
+      if (prev && prev.level !== 0 && r.level > prev.level + 1) {
+        errors.push({ 
+          row: r.origIdx, 
+          msg: `Строка ${r.origIdx}: уровень ${r.level}, предыдущий ${prev.level} — пропуск уровня` 
+        });
+      }
+      prev = r;
+    }
+
+    // 3. Проверка сумм детей
+    const tree = this.buildTree(rows);
+    this.checkSums(tree, errors);
+
+    // 4. Сверка с ИТОГО
+    const control = rows.find(r => r.level === 0);
+    const roots = rows.filter(r => r.level === 1);
+    if (control && roots.length) {
+      const sumRoots = roots.reduce((s, r) => s + (r.sum || 0), 0);
+      const diff = Math.abs(sumRoots - (control.sum || 0));
+      if (diff > CONFIG.SUM_TOLERANCE) {
+        errors.push({ 
+          row: control.origIdx, 
+          msg: `ИТОГО ${control.sum}, а сумма корней ${sumRoots} (расхождение ${Math.round(diff)} ₽)` 
+        });
+      }
+    }
+    
+    if (!control) {
+      warnings.push({ row: null, msg: `Нет строки уровня 0 (ИТОГО/Мода) — сверка сумм недоступна` });
+    }
+
+    // 5. Дубли
+    const pathMap = new Map();
+    for (const r of rows) {
+      if (r.level === null || r.level === 0) continue;
+      const pathKey = this.getPath(rows, r).join(' > ');
+      if (pathMap.has(pathKey)) {
+        errors.push({ 
+          row: r.origIdx, 
+          msg: `Строка ${r.origIdx}: «${r.name}» дубль (уже есть в строке ${pathMap.get(pathKey)})` 
+        });
+      } else { 
+        pathMap.set(pathKey, r.origIdx); 
+      }
+    }
+
+    // Одиночные проверки
+    for (const r of rows) {
+      if (r.level === 3 && (r.sum === null || r.sum === 0)) {
+        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — лист, но сумма 0` });
+      }
+      if (r.level !== null && r.level < 3 && r.qty !== null && r.qty > 0) {
+        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — папка, но есть кол-во ${r.qty}` });
+      }
+      if (r.sum !== null && r.sum < 0) {
+        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — отрицательная сумма` });
+      }
+    }
+  },
+
+  typos(rows, errors, warnings, infos) {
+    const groups = new Map();
+    for (const r of rows) {
+      if (r.level === null || r.level === 0) continue;
+      const key = this.getPath(rows, r).slice(0, -1).join(' > ') + '||' + r.level;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(r);
+    }
+    
+    for (const [key, group] of groups) {
+      for (let i = 0; i < group.length; i++) {
+        for (let j = i + 1; j < group.length; j++) {
+          const a = group[i], b = group[j];
+          const na = Utils.normalize(a.name), nb = Utils.normalize(b.name);
+          if (na === nb) continue;
+          
+          const dist = Utils.levenshtein(na, nb);
+          const threshold = Math.min(na.length, nb.length) < 5 ? CONFIG.LEVENSHTEIN_SHORT : CONFIG.LEVENSHTEIN_LONG;
+          
+          if (dist <= threshold) {
+            warnings.push({ 
+              row: b.origIdx, 
+              msg: `Строка ${b.origIdx}: «${b.name}» похоже на «${a.name}» (опечатка?)` 
+            });
+          }
+        }
+      }
+    }
+    
+    for (const r of rows) {
+      if (Utils.hasTrailingSpace(r.name)) {
+        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — пробел в начале/конце` });
+      }
+      if (Utils.hasDoubleSpace(r.name)) {
+        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — двойной пробел` });
+      }
+      if (Utils.hasInvisible(r.name)) {
+        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — невидимый символ` });
+      }
+      if (Utils.hasLatin(r.name) && Utils.hasCyrillic(r.name)) {
+        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — латинские буквы в русском` });
+      }
+    }
+  },
+
+  logic(rows, errors, warnings, infos) {
+    const sums = rows.filter(r => r.sum !== null && r.sum > 0).map(r => r.sum);
+    const med = Utils.median(sums);
+    if (med > 0) {
+      for (const r of rows) {
+        if (r.sum !== null && r.sum > med * CONFIG.BIG_SUM_MULTIPLIER) {
+          infos.push({ 
+            row: r.origIdx, 
+            msg: `Строка ${r.origIdx}: «${r.name}» — сумма ${r.sum} в ${Math.round(r.sum / med)}× больше медианы` 
+          });
+        }
+      }
+    }
+  },
+
+  // --- Вспомогательные методы ---
   buildTree(rows) {
-    const roots = [];
+    const roots = []; 
     const stack = [];
-    for (const row of rows) {
-      if (row.level === null) continue;
-      const node = { row, children: [] };
-      while (stack.length && stack[stack.length - 1].row.level >= row.level) stack.pop();
-      if (stack.length) stack[stack.length - 1].children.push(node);
+    for (const r of rows) {
+      if (r.level === null || r.level === 0) continue;
+      while (stack.length && stack[stack.length - 1].level >= r.level) stack.pop();
+      const node = { ...r, children: [] };
+      if (stack.length) stack[stack.length - 1].children.push(node); 
       else roots.push(node);
       stack.push(node);
     }
     return roots;
   },
 
-  checkSums(tree, errors, warnings) {
-    const walk = (nodes, parentName) => {
-      for (const node of nodes) {
-        const { row, children } = node;
-        if (children.length === 0) continue; // лист — нечего сверять
-        const childrenSum = children.reduce((acc, c) => acc + (c.row.sum || 0), 0);
-        const parentSum = row.sum || 0;
-        const diff = Math.abs(childrenSum - parentSum);
-        if (diff > 1) {
-          errors.push({
-            rowId: row.id,
-            text: `«${row.name}»: сумма ${Utils.fmtSum(parentSum)} ₽, а сумма детей ${Utils.fmtSum(childrenSum)} ₽ — расхождение ${Utils.fmtSum(diff)} ₽`,
+  checkSums(nodes, errors) {
+    for (const n of nodes) {
+      if (n.children.length > 0) {
+        this.checkSums(n.children, errors);
+        const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
+        const diff = Math.abs(sumChildren - (n.sum || 0));
+        
+        if (diff > CONFIG.SUM_TOLERANCE) {
+          errors.push({ 
+            row: n.origIdx, 
+            msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren} (расхождение ${Math.round(diff)} ₽)` 
           });
         }
-        walk(children, row.name);
       }
-    };
-    walk(tree, '');
+    }
   },
 
-  checkDuplicates(tree, errors, warnings) {
-    const walk = (nodes, parentPath) => {
-      const seen = new Map();
-      for (const node of nodes) {
-        const norm = Utils.normalize(node.row.name);
-        if (seen.has(norm)) {
-          warnings.push({
-            rowId: node.row.id,
-            text: `Дубль имени «${node.row.name}» под «${parentPath || 'корень'}» (строки ${seen.get(norm) + 1} и ${node.row.id + 1})`,
-          });
-        } else {
-          seen.set(norm, node.row.id);
-        }
-        walk(node.children, parentPath ? `${parentPath} > ${node.row.name}` : node.row.name);
+  getPath(rows, target) {
+    const path = [target.name];
+    let currentLevel = target.level;
+    const targetIdx = rows.indexOf(target);
+    
+    for (let i = targetIdx - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.level !== null && r.level < currentLevel) { 
+        path.unshift(r.name); 
+        currentLevel = r.level; 
+        if (currentLevel === 1) break; 
       }
-    };
-    walk(tree, '');
-  },
-
-  checkTypos(tree, warnings, infos) {
-    const walk = (nodes, parentPath) => {
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const a = nodes[i].row;
-          const b = nodes[j].row;
-          const normA = Utils.normalize(a.name);
-          const normB = Utils.normalize(b.name);
-          if (normA === normB) continue; // точный дубль — уже проверили
-          const dist = Utils.levenshtein(normA, normB);
-          const threshold = Math.min(normA.length, normB.length) >= 5 ? 2 : 1;
-          if (dist > 0 && dist <= threshold) {
-            warnings.push({
-              rowId: b.id,
-              text: `Возможная опечатка: «${a.name}» (строка ${a.id + 1}) и «${b.name}» (строка ${b.id + 1}) — расстояние ${dist}`,
-            });
-          }
-        }
-        walk(nodes[i].children, parentPath ? `${parentPath} > ${nodes[i].row.name}` : nodes[i].row.name);
-      }
-    };
-    walk(tree, '');
-  },
+    }
+    return path;
+  }
 };
 
-// ---------- UI ----------
-const UI = {
-  toast(msg, type = 'default') {
-    const el = document.createElement('div');
-    el.className = `toast ${type}`;
-    el.textContent = msg;
-    document.getElementById('toast-container').appendChild(el);
-    requestAnimationFrame(() => el.classList.add('show'));
-    setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 300); }, 3000);
+// ==========================================
+// UI ИНТЕРФЕЙС
+// ==========================================
+const App = {
+  state: { rows: [], removed: [], filename: '' },
+  
+  init() {
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    
+    dropZone.onclick = () => fileInput.click();
+    fileInput.onchange = (e) => this.handleFile(e.target.files[0]);
+    
+    document.getElementById('btn-new').onclick = () => {
+      this.state = { rows: [], removed: [], filename: '' };
+      document.getElementById('screen-work').hidden = true;
+      document.getElementById('screen-upload').hidden = false;
+      document.querySelector('.upload-title').textContent = 'Нажми, чтобы выбрать файл';
+      fileInput.value = '';
+    };
+    
+    document.getElementById('btn-check').onclick = () => this.check();
+    document.getElementById('btn-export').onclick = () => this.export();
   },
 
-  renderAll() {
-    this.renderSummary();
-    this.renderTable();
-    this.renderIssues();
-    this.updateExportButton();
-  },
-
-  renderSummary() {
-    const card = document.getElementById('summary-card');
-    card.classList.remove('hidden');
-    document.getElementById('sum-rows').textContent = State.rows.length;
-    const e = State.issues.errors.length;
-    const w = State.issues.warnings.length;
-    const i = State.issues.infos.length;
-    const bE = document.getElementById('sum-errors');
-    const bW = document.getElementById('sum-warnings');
-    const bI = document.getElementById('sum-infos');
-    bE.textContent = `🔴 ${e}`;
-    bW.textContent = `🟡 ${w}`;
-    bI.textContent = `ℹ ${i}`;
-    bE.className = 'badge ' + (e ? 'err' : '');
-    bW.className = 'badge ' + (w ? 'warn' : '');
-    bI.className = 'badge ' + (i ? 'info' : '');
-    document.getElementById('removed-count').textContent = State.removed.length;
+  async handleFile(file) {
+    if (!file) return;
+    
+    document.querySelector('.upload-title').textContent = 'Чтение файла...';
+    try {
+      const { raw } = await Reader.read(file);
+      const { rows, removed } = Cleaner.clean(raw);
+      
+      this.state.rows = Guesser.guess(rows);
+      this.state.removed = removed;
+      this.state.filename = file.name;
+      
+      document.getElementById('screen-upload').hidden = true;
+      document.getElementById('screen-work').hidden = false;
+      document.getElementById('file-name').textContent = file.name;
+      document.getElementById('file-meta').textContent = `Строк: ${rows.length} · Удалено мусора: ${removed.length}`;
+      
+      this.renderTable();
+      this.check();
+      
+      if (removed.length > 0) this.showRemoved();
+    } catch (err) {
+      alert('Ошибка: ' + err.message);
+      document.querySelector('.upload-title').textContent = 'Нажми, чтобы выбрать файл';
+    }
   },
 
   renderTable() {
-    const card = document.getElementById('table-card');
-    card.classList.remove('hidden');
     const tbody = document.getElementById('table-body');
-    const errorRows = new Set(State.issues.errors.map(x => x.rowId));
-    const warnRows = new Set(State.issues.warnings.map(x => x.rowId));
-
-    tbody.innerHTML = State.rows.map((row, idx) => {
-      const rowClass = errorRows.has(row.id) ? 'row-err' : warnRows.has(row.id) ? 'row-warn' : '';
-      const flag = errorRows.has(row.id) ? '🔴' : warnRows.has(row.id) ? '🟡' : '';
-      const levelClass = row.level === null ? 'lvl-unset' : `lvl-${row.level}`;
-      const levelOpts = [0,1,2,3].map(l =>
-        `<option value="${l}" ${row.level === l ? 'selected' : ''}>${l}</option>`
+    tbody.innerHTML = this.state.rows.map((r, i) => {
+      const isUnset = r.level === null;
+      const levelOpts = [0, 1, 2, 3, 4].map(l => 
+        `<option value="${l}" ${r.level === l ? 'selected' : ''}>${l === 0 ? 'ИТОГ' : l}</option>`
       ).join('');
+      
       return `
-        <tr data-row-id="${row.id}" class="${rowClass}">
-          <td class="td-num">${idx + 1}</td>
+        <tr data-idx="${i}" id="row-${r.origIdx}">
+          <td class="td-num">${r.origIdx}</td>
           <td>
-            <select class="level-select ${levelClass}" data-id="${row.id}">
-              <option value="" ${row.level === null ? 'selected' : ''}>—</option>
+            <select class="level-select ${isUnset ? 'unset' : (r.level === 0 ? 'l0' : '')}" onchange="App.updateLevel(${i}, this.value)">
+              <option value="" disabled ${isUnset ? 'selected' : ''}>—</option>
               ${levelOpts}
             </select>
           </td>
-          <td class="td-name" title="${this.escape(row.name)}">${this.escape(row.name)}</td>
-          <td class="td-qty">${row.qty !== null ? row.qty : ''}</td>
-          <td class="td-sum">${row.sum !== null ? Utils.fmtSum(row.sum) : ''}</td>
-          <td class="td-flag">${flag}</td>
+          <td class="td-name">
+            <input class="name-input" value="${r.name.replace(/"/g, '&quot;')}" onchange="App.updateName(${i}, this.value)">
+          </td>
+          <td>
+            <input type="number" class="qty-input" value="${r.qty ?? ''}" onchange="App.updateQty(${i}, this.value)">
+          </td>
+          <td>
+            <input type="number" class="sum-input" value="${r.sum ?? ''}" onchange="App.updateSum(${i}, this.value)">
+          </td>
+          <td>
+            <button class="btn-mini" onclick="App.deleteRow(${i})" title="Удалить">🗑</button>
+          </td>
         </tr>
       `;
     }).join('');
-
-    // Обработчик смены уровня
-    tbody.querySelectorAll('.level-select').forEach(sel => {
-      sel.addEventListener('change', (e) => {
-        const id = Number(e.target.dataset.id);
-        const val = e.target.value;
-        const row = State.rows.find(r => r.id === id);
-        if (row) {
-          row.level = val === '' ? null : Number(val);
-          State.issues = Checks.run(State.rows);
-          UI.renderAll();
-        }
-      });
-    });
   },
 
-  renderIssues() {
-    const card = document.getElementById('issues-card');
-    card.classList.remove('hidden');
-
-    const blockE = document.getElementById('issues-errors');
-    const blockW = document.getElementById('issues-warnings');
-    const blockI = document.getElementById('issues-infos');
-
-    const renderBlock = (block, list, type) => {
-      if (!list.length) { block.innerHTML = ''; return; }
-      block.innerHTML = list.map(item => `
-        <div class="issue-item ${type}" data-row-id="${item.rowId ?? ''}">
-          <span class="issue-icon">${type === 'error' ? '🔴' : type === 'warn' ? '🟡' : 'ℹ'}</span>
-          <span class="issue-text">${this.escape(item.text)}</span>
-        </div>
-      `).join('');
-    };
-
-    renderBlock(blockE, State.issues.errors, 'error');
-    renderBlock(blockW, State.issues.warnings, 'warn');
-    renderBlock(blockI, State.issues.infos, 'info');
-
-    // Клик по ошибке → скролл к строке
-    card.querySelectorAll('.issue-item').forEach(el => {
-      el.addEventListener('click', () => {
-        const rowId = el.dataset.rowId;
-        if (rowId === '' || rowId === undefined) return;
-        const tr = document.querySelector(`tr[data-row-id="${rowId}"]`);
-        if (tr) {
-          tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          tr.classList.add('row-flash');
-          setTimeout(() => tr.classList.remove('row-flash'), 1000);
-        }
-      });
-    });
+  updateLevel(i, val) {
+    this.state.rows[i].level = val === '' ? null : parseInt(val);
+    this.renderTable(); 
+    this.check();
   },
-
-  updateExportButton() {
-    const actions = document.getElementById('actions-card');
-    actions.classList.remove('hidden');
-    const btn = document.getElementById('btn-export');
-    const hint = document.getElementById('export-hint');
-    const hasErrors = State.issues.errors.length > 0;
-    btn.disabled = hasErrors;
-    if (hasErrors) {
-      hint.textContent = `Исправь ${State.issues.errors.length} красных ошибок, чтобы скачать`;
-    } else if (State.issues.warnings.length) {
-      hint.textContent = `Есть ${State.issues.warnings.length} предупреждений — можно скачать, но проверь`;
-    } else {
-      hint.textContent = 'Всё ок — можно скачать';
+  updateName(i, val) { 
+    this.state.rows[i].name = val.trim(); 
+    this.check(); 
+  },
+  updateQty(i, val) { 
+    this.state.rows[i].qty = val === '' ? null : parseFloat(val); 
+    this.check(); 
+  },
+  updateSum(i, val) { 
+    this.state.rows[i].sum = val === '' ? null : parseFloat(val); 
+    this.check(); 
+  },
+  deleteRow(i) {
+    if (confirm('Удалить эту строку?')) {
+      this.state.rows.splice(i, 1);
+      this.renderTable();
+      this.check();
     }
   },
 
-  renderRemoved() {
-    const list = document.getElementById('removed-list');
-    const btn = document.getElementById('btn-show-removed');
-    if (!State.removed.length) { list.innerHTML = '<div class="removed-item">Пусто</div>'; return; }
-    list.innerHTML = State.removed.map(r =>
-      `<div class="removed-item">Строка ${r.idx}: «${this.escape(r.name)}» — ${r.reason}</div>`
-    ).join('');
+  check() {
+    const { errors, warnings, infos } = Checks.all(this.state.rows);
+    
+    document.getElementById('stat-err').textContent = `🔴 ${errors.length}`;
+    document.getElementById('stat-warn').textContent = `🟡 ${warnings.length}`;
+    document.getElementById('stat-info').textContent = `🔵 ${infos.length}`;
+    
+    const panel = document.getElementById('issues-panel');
+    panel.innerHTML = [
+      ...errors.map(e => `<div class="issue error" onclick="App.scrollToRow(${e.row})"><span class="issue-icon">🔴</span><span class="issue-text">${e.msg}</span></div>`),
+      ...warnings.map(w => `<div class="issue warn" onclick="App.scrollToRow(${w.row})"><span class="issue-icon">🟡</span><span class="issue-text">${w.msg}</span></div>`),
+      ...infos.map(i => `<div class="issue info" onclick="App.scrollToRow(${i.row})"><span class="issue-icon">🔵</span><span class="issue-text">${i.msg}</span></div>`)
+    ].join('');
+    
+    const btnExport = document.getElementById('btn-export');
+    btnExport.disabled = errors.length > 0;
+    
+    document.querySelectorAll('.edit-table tr').forEach(tr => tr.classList.remove('row-error', 'row-warn'));
+    errors.forEach(e => { 
+      const tr = document.getElementById('row-' + e.row); 
+      if (tr) tr.classList.add('row-error'); 
+    });
+    warnings.forEach(w => { 
+      const tr = document.getElementById('row-' + w.row); 
+      if (tr) tr.classList.add('row-warn'); 
+    });
   },
 
-  escape(s) {
-    return String(s ?? '')
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  scrollToRow(origIdx) {
+    if (!origIdx) return;
+    const tr = document.getElementById('row-' + origIdx);
+    if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
   },
-};
 
-// ---------- EXPORT ----------
-const Exporter = {
+  showRemoved() {
+    const root = document.getElementById('modal-root');
+    const content = document.getElementById('modal-content');
+    content.innerHTML = `
+      <h2>Удалённые строки (${this.state.removed.length})</h2>
+      <p>Эти строки не попали в таблицу, так как не содержат данных о продажах или являются служебными.</p>
+      <ul style="max-height: 40vh; overflow-y: auto; padding-left: 20px; margin-bottom: 20px;">
+        ${this.state.removed.map(r => `<li style="margin-bottom:8px;">Стр. ${r.idx}: ${r.name} <br><small style="color:#888">${r.reason}</small></li>`).join('')}
+      </ul>
+      <button class="btn btn-primary" onclick="document.getElementById('modal-root').classList.remove('open')">Понятно</button>
+    `;
+    root.classList.add('open');
+  },
+
   export() {
-    // Формируем данные: уровень | имя | кол-во | сумма
-    const data = State.rows.map(row => {
-      // чистим имя
-      const name = Utils.trimInvisible(row.name);
-      return [row.level, name, row.qty, row.sum];
-    });
+    // Формируем массив для XLSX: [уровень, имя, кол-во, сумма]
+    const data = this.state.rows.map(r => [
+      r.level,
+      r.name,
+      r.qty,
+      r.sum
+    ]);
 
-    // Создаём workbook
+    // Создаем лист и книгу
     const ws = XLSX.utils.aoa_to_sheet(data);
-    // Ширина колонок
-    ws['!cols'] = [
-      { wch: 8 },  // уровень
-      { wch: 40 }, // имя
-      { wch: 10 }, // кол-во
-      { wch: 14 }, // сумма
-    ];
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Данные');
+    XLSX.utils.book_append_sheet(wb, ws, "Очищенные данные");
 
-    // Имя файла: исходное + _clean
-    const base = State.fileName.replace(/\.xlsx?$/i, '');
-    const outName = `${base}_clean.xlsx`;
-
-    XLSX.writeFile(wb, outName);
-    UI.toast(`Скачано: ${outName}`);
-  },
+    // Скачиваем файл
+    XLSX.writeFile(wb, `clean_${this.state.filename.replace('.xlsx', '')}.xlsx`);
+  }
 };
 
-// ---------- MAIN ----------
+// Запуск приложения при загрузке страницы
 document.addEventListener('DOMContentLoaded', () => {
-  const fileInput = document.getElementById('file-input');
-  const btnUpload = document.getElementById('btn-upload');
-  const btnValidate = document.getElementById('btn-validate');
-  const btnExport = document.getElementById('btn-export');
-  const btnShowRemoved = document.getElementById('btn-show-removed');
-
-  btnUpload.addEventListener('click', () => fileInput.click());
-
-  fileInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    State.fileName = file.name;
-    document.getElementById('file-info').textContent = `Файл: ${file.name}`;
-    UI.toast('Читаю файл...');
-    try {
-      const rawRows = await Reader.read(file);
-      const { rows, removed } = Cleaner.clean(rawRows);
-      if (!rows.length) {
-        UI.toast('Не найдено строк с данными', 'error');
-        return;
-      }
-      Guesser.guess(rows);
-      State.rows = rows;
-      State.removed = removed;
-      State.issues = Checks.run(rows);
-      UI.renderRemoved();
-      UI.renderAll();
-      UI.toast(`Загружено: ${rows.length} строк, удалено мусора: ${removed.length}`);
-    } catch (err) {
-      console.error(err);
-      UI.toast('Ошибка чтения файла', 'error');
-    }
-  });
-
-  btnValidate.addEventListener('click', () => {
-    State.issues = Checks.run(State.rows);
-    UI.renderAll();
-    UI.toast('Проверено');
-  });
-
-  btnExport.addEventListener('click', () => {
-    if (State.issues.errors.length) {
-      UI.toast('Есть красные ошибки — исправь', 'error');
-      return;
-    }
-    Exporter.export();
-  });
-
-  btnShowRemoved.addEventListener('click', () => {
-    const list = document.getElementById('removed-list');
-    list.classList.toggle('hidden');
-  });
+  App.init();
 });
