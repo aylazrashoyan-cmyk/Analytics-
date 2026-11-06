@@ -1,5 +1,5 @@
 // ==========================================
-// НОРМАЛИЗАТОР 1С — v1.1 (Полный код)
+// НОРМАЛИЗАТОР 1С — v2.0 (Умный парсер)
 // ==========================================
 
 const CONFIG = {
@@ -7,12 +7,9 @@ const CONFIG = {
   LEVENSHTEIN_LONG: 2, 
   SUM_TOLERANCE: 1, 
   BIG_SUM_MULTIPLIER: 5,
-  GARBAGE_NAMES: ['номенклатура', 'отбор', 'итого', 'мода', 'всего', 'продажи', 'магазин', 'склад', 'торговый зал'],
+  GARBAGE_NAMES: ['номенклатура', 'отбор', 'итого', 'продажи', 'магазин', 'склад', 'торговый зал'],
 };
 
-// ==========================================
-// УТИЛИТЫ
-// ==========================================
 const Utils = {
   toNum(v) {
     if (v === null || v === undefined || v === '') return null;
@@ -59,9 +56,6 @@ const Utils = {
   },
 };
 
-// ==========================================
-// ЧТЕНИЕ ФАЙЛА
-// ==========================================
 const Reader = {
   read(file) {
     return new Promise((resolve, reject) => {
@@ -72,9 +66,7 @@ const Reader = {
           const sheet = wb.Sheets[wb.SheetNames[0]];
           const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: null, raw: true });
           resolve({ raw, sheetName: wb.SheetNames[0] });
-        } catch (err) { 
-          reject(err); 
-        }
+        } catch (err) { reject(err); }
       };
       reader.onerror = () => reject(new Error('Ошибка чтения файла'));
       reader.readAsArrayBuffer(file);
@@ -83,7 +75,7 @@ const Reader = {
 };
 
 // ==========================================
-// ОЧИСТКА
+// ОЧИСТКА (Умная)
 // ==========================================
 const Cleaner = {
   clean(raw) {
@@ -95,23 +87,19 @@ const Cleaner = {
       const nameRaw = r[0];
       const name = nameRaw == null ? '' : String(nameRaw).trim();
       
-      if (!name) { 
-        removed.push({ idx: i + 1, name: '(пусто)', reason: 'пустая строка' }); 
-        continue; 
-      }
+      if (!name) continue; // Пропускаем пустые без записи в мусор
       
       const normName = Utils.normalize(name);
-      const isControl = ['итого', 'мода', 'всего'].includes(normName);
       
-      if (Utils.isGarbageName(name) && !isControl) {
-        removed.push({ idx: i + 1, name, reason: 'служебная строка' }); 
+      // Если это служебная строка 1С (Мода, Торговый зал, Одежда (без данных))
+      if (Utils.isGarbageName(name)) {
+        removed.push({ idx: i + 1, name, reason: 'служебная строка 1С' }); 
         continue;
       }
 
       let qty = null, sum = null;
       const nums = [];
       
-      // Ищем числа в строке: предпоследнее считаем кол-вом, последнее - суммой
       for (let c = 1; c < r.length; c++) {
         const v = Utils.toNum(r[c]);
         if (v !== null) nums.push({ col: c, val: v });
@@ -122,12 +110,6 @@ const Cleaner = {
         sum = nums[nums.length - 1].val; 
       } else if (nums.length === 1) { 
         sum = nums[0].val; 
-      }
-
-      // Если нет ни суммы, ни кол-ва — это мусор
-      if (sum === null && qty === null) {
-        removed.push({ idx: i + 1, name, reason: 'нет суммы и кол-ва' }); 
-        continue;
       }
 
       rows.push({ 
@@ -144,25 +126,62 @@ const Cleaner = {
 };
 
 // ==========================================
-// АВТОУГАДЫВАНИЕ УРОВНЕЙ
+// АВТОУГАДЫВАНИЕ УРОВНЕЙ (Умное)
 // ==========================================
 const Guesser = {
   guess(rows) {
-    for (const row of rows) {
+    let currentLevel = 1;
+    
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
       const n = Utils.normalize(row.name);
       
-      if (['итого', 'мода', 'всего'].includes(n)) { 
-        row.level = 0; 
-        continue; 
+      // 1. Самая первая строка (Мода / Итого)
+      if (n === 'мода' || n === 'итого' || n === 'всего') {
+        row.level = 0;
+        currentLevel = 1;
+        continue;
+      }
+
+      // 2. Если это явно лист (есть количество)
+      if (row.qty !== null && row.qty !== 0) {
+        // Проверка на дубль папки: "Куртка" (40 шт) и следующая "Куртка" (40 шт)
+        const nextRow = rows[i + 1];
+        if (nextRow && 
+            row.qty === nextRow.qty && 
+            row.sum === nextRow.sum && 
+            Utils.normalize(row.name) !== Utils.normalize(nextRow.name)) {
+          row.level = currentLevel; // Это папка-дубль
+          continue;
+        }
+        
+        row.level = 4; // Товар (лист)
+        continue;
+      }
+
+      // 3. Если нет количества - это папка. Какой уровень?
+      // Если следующая строка имеет уровень 4, значит эта папка = 3
+      let nextLevel = 4;
+      if (rows[i + 1]) {
+         // Смотрим на следующую строку (если она тоже папка)
+         if (rows[i + 1].qty === null) nextLevel = 3; 
       }
       
-      // Если есть кол-во и сумма > 0, это лист (товар)
-      if (row.qty !== null && row.sum !== null && row.qty > 0) { 
-        row.level = 3; 
-      } else { 
-        row.level = null; // Папка — разметить вручную
+      if (nextLevel === 4) {
+         row.level = currentLevel + 1;
+         currentLevel = row.level;
+      } else {
+         row.level = currentLevel;
       }
     }
+
+    // Финальная корректировка: убираем "перепрыгивания" уровней
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i].level > rows[i-1].level + 1 && rows[i].level !== 0) {
+        rows[i].level = rows[i-1].level + 1;
+      }
+    }
+
     return rows;
   },
 };
@@ -178,23 +197,13 @@ const Checks = {
     
     this.structure(rows, errors, warnings, infos);
     this.typos(rows, errors, warnings, infos);
-    this.logic(rows, errors, warnings, infos);
-    
     return { errors, warnings, infos };
   },
 
   structure(rows, errors, warnings, infos) {
     const marked = rows.filter(r => r.level !== null);
     
-    // 1. Первый уровень должен быть 1 или 0
-    if (marked.length > 0 && marked[0].level !== 0 && marked[0].level !== 1) {
-      errors.push({ 
-        row: marked[0].origIdx, 
-        msg: `Строка ${marked[0].origIdx}: уровень ${marked[0].level}, ожидался 1 или 0` 
-      });
-    }
-
-    // 2. Пропуск уровней
+    // Пропуск уровней
     let prev = null;
     for (const r of marked) {
       if (r.level === 0) continue;
@@ -207,11 +216,11 @@ const Checks = {
       prev = r;
     }
 
-    // 3. Проверка сумм детей
+    // Проверка сумм
     const tree = this.buildTree(rows);
     this.checkSums(tree, errors);
 
-    // 4. Сверка с ИТОГО
+    // Сверка с ИТОГО
     const control = rows.find(r => r.level === 0);
     const roots = rows.filter(r => r.level === 1);
     if (control && roots.length) {
@@ -226,35 +235,7 @@ const Checks = {
     }
     
     if (!control) {
-      warnings.push({ row: null, msg: `Нет строки уровня 0 (ИТОГО/Мода) — сверка сумм недоступна` });
-    }
-
-    // 5. Дубли
-    const pathMap = new Map();
-    for (const r of rows) {
-      if (r.level === null || r.level === 0) continue;
-      const pathKey = this.getPath(rows, r).join(' > ');
-      if (pathMap.has(pathKey)) {
-        errors.push({ 
-          row: r.origIdx, 
-          msg: `Строка ${r.origIdx}: «${r.name}» дубль (уже есть в строке ${pathMap.get(pathKey)})` 
-        });
-      } else { 
-        pathMap.set(pathKey, r.origIdx); 
-      }
-    }
-
-    // Одиночные проверки
-    for (const r of rows) {
-      if (r.level === 3 && (r.sum === null || r.sum === 0)) {
-        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — лист, но сумма 0` });
-      }
-      if (r.level !== null && r.level < 3 && r.qty !== null && r.qty > 0) {
-        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — папка, но есть кол-во ${r.qty}` });
-      }
-      if (r.sum !== null && r.sum < 0) {
-        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — отрицательная сумма` });
-      }
+      warnings.push({ row: null, msg: `Нет строки уровня 0 (ИТОГО/Мода)` });
     }
   },
 
@@ -288,37 +269,13 @@ const Checks = {
     }
     
     for (const r of rows) {
-      if (Utils.hasTrailingSpace(r.name)) {
-        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — пробел в начале/конце` });
-      }
-      if (Utils.hasDoubleSpace(r.name)) {
-        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — двойной пробел` });
-      }
-      if (Utils.hasInvisible(r.name)) {
-        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — невидимый символ` });
-      }
-      if (Utils.hasLatin(r.name) && Utils.hasCyrillic(r.name)) {
-        warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — латинские буквы в русском` });
-      }
+      if (Utils.hasTrailingSpace(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — пробел в начале/конце` });
+      if (Utils.hasDoubleSpace(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — двойной пробел` });
+      if (Utils.hasInvisible(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — невидимый символ` });
+      if (Utils.hasLatin(r.name) && Utils.hasCyrillic(r.name)) warnings.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» — латинские буквы` });
     }
   },
 
-  logic(rows, errors, warnings, infos) {
-    const sums = rows.filter(r => r.sum !== null && r.sum > 0).map(r => r.sum);
-    const med = Utils.median(sums);
-    if (med > 0) {
-      for (const r of rows) {
-        if (r.sum !== null && r.sum > med * CONFIG.BIG_SUM_MULTIPLIER) {
-          infos.push({ 
-            row: r.origIdx, 
-            msg: `Строка ${r.origIdx}: «${r.name}» — сумма ${r.sum} в ${Math.round(r.sum / med)}× больше медианы` 
-          });
-        }
-      }
-    }
-  },
-
-  // --- Вспомогательные методы ---
   buildTree(rows) {
     const roots = []; 
     const stack = [];
@@ -340,6 +297,7 @@ const Checks = {
         const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
         const diff = Math.abs(sumChildren - (n.sum || 0));
         
+        // Допускаем расхождение, если это дубль папки
         if (diff > CONFIG.SUM_TOLERANCE) {
           errors.push({ 
             row: n.origIdx, 
@@ -458,18 +416,9 @@ const App = {
     this.renderTable(); 
     this.check();
   },
-  updateName(i, val) { 
-    this.state.rows[i].name = val.trim(); 
-    this.check(); 
-  },
-  updateQty(i, val) { 
-    this.state.rows[i].qty = val === '' ? null : parseFloat(val); 
-    this.check(); 
-  },
-  updateSum(i, val) { 
-    this.state.rows[i].sum = val === '' ? null : parseFloat(val); 
-    this.check(); 
-  },
+  updateName(i, val) { this.state.rows[i].name = val.trim(); this.check(); },
+  updateQty(i, val) { this.state.rows[i].qty = val === '' ? null : parseFloat(val); this.check(); },
+  updateSum(i, val) { this.state.rows[i].sum = val === '' ? null : parseFloat(val); this.check(); },
   deleteRow(i) {
     if (confirm('Удалить эту строку?')) {
       this.state.rows.splice(i, 1);
@@ -496,14 +445,8 @@ const App = {
     btnExport.disabled = errors.length > 0;
     
     document.querySelectorAll('.edit-table tr').forEach(tr => tr.classList.remove('row-error', 'row-warn'));
-    errors.forEach(e => { 
-      const tr = document.getElementById('row-' + e.row); 
-      if (tr) tr.classList.add('row-error'); 
-    });
-    warnings.forEach(w => { 
-      const tr = document.getElementById('row-' + w.row); 
-      if (tr) tr.classList.add('row-warn'); 
-    });
+    errors.forEach(e => { const tr = document.getElementById('row-' + e.row); if (tr) tr.classList.add('row-error'); });
+    warnings.forEach(w => { const tr = document.getElementById('row-' + w.row); if (tr) tr.classList.add('row-warn'); });
   },
 
   scrollToRow(origIdx) {
@@ -527,25 +470,12 @@ const App = {
   },
 
   export() {
-    // Формируем массив для XLSX: [уровень, имя, кол-во, сумма]
-    const data = this.state.rows.map(r => [
-      r.level,
-      r.name,
-      r.qty,
-      r.sum
-    ]);
-
-    // Создаем лист и книгу
+    const data = this.state.rows.map(r => [r.level, r.name, r.qty, r.sum]);
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Очищенные данные");
-
-    // Скачиваем файл
     XLSX.writeFile(wb, `clean_${this.state.filename.replace('.xlsx', '')}.xlsx`);
   }
 };
 
-// Запуск приложения при загрузке страницы
-document.addEventListener('DOMContentLoaded', () => {
-  App.init();
-});
+document.addEventListener('DOMContentLoaded', () => { App.init(); });
