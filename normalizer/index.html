@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Нормализатор 1С</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="xlsx.full.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <h1 class="h1">Нормализатор 1С</h1>
+      <p class="subtitle">Приведи выгрузку к формату: уровень | имя | кол-во | сумма</p>
+    </header>
+
+    <!-- Загрузка -->
+    <div class="card" id="upload-card">
+      <input type="file" id="file-input" accept=".xlsx,.xls" hidden>
+      <button class="btn btn-primary" id="btn-upload">Загрузить .xlsx</button>
+      <p class="hint" id="file-info"></p>
+    </div>
+
+    <!-- Сводка -->
+    <div class="card hidden" id="summary-card">
+      <div class="summary-row">
+        <span>Строк: <b id="sum-rows">0</b></span>
+        <span class="badge" id="sum-errors">🔴 0</span>
+        <span class="badge" id="sum-warnings">🟡 0</span>
+        <span class="badge" id="sum-infos">ℹ 0</span>
+      </div>
+      <button class="btn btn-secondary btn-sm" id="btn-show-removed">
+        Показать удалённое (<span id="removed-count">0</span>)
+      </button>
+      <div class="removed-list hidden" id="removed-list"></div>
+    </div>
+
+    <!-- Таблица -->
+    <div class="card hidden" id="table-card">
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>№</th>
+              <th>Ур.</th>
+              <th>Имя</th>
+              <th>Кол</th>
+              <th>Сумма</th>
+              <th>⚠</th>
+            </tr>
+          </thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Ошибки -->
+    <div class="card hidden" id="issues-card">
+      <h2 class="card-title">Проверки</h2>
+      <div id="issues-errors" class="issues-block"></div>
+      <div id="issues-warnings" class="issues-block"></div>
+      <div id="issues-infos" class="issues-block"></div>
+    </div>
+
+    <!-- Действия -->
+    <div class="actions hidden" id="actions-card">
+      <button class="btn btn-secondary" id="btn-validate">Проверить</button>
+      <button class="btn btn-primary" id="btn-export" disabled>Скачать .xlsx</button>
+      <p class="hint" id="export-hint">Исправь красные ошибки, чтобы скачать</p>
+    </div>
+  </div>
+
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="normalizer.js"></script>
+</body>
+</html>
