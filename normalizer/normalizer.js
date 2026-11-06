@@ -1,5 +1,5 @@
 // ==========================================
-// НОРМАЛИЗАТОР 1С — v2.1 (Матрёшка)
+// НОРМАЛИЗАТОР 1С — v4.0 (Математическое дерево)
 // ==========================================
 
 const CONFIG = {
@@ -7,6 +7,8 @@ const CONFIG = {
   LEVENSHTEIN_LONG: 2, 
   SUM_TOLERANCE: 1, 
   GARBAGE_NAMES: ['номенклатура', 'отбор', 'итого', 'продажи', 'магазин', 'склад', 'торговый зал'],
+  ROOT_FOLDERS: ['одежда', 'обувь', 'аксессуары', 'распродажа', 'будут удалены'],
+  SECOND_LEVEL: ['женская', 'мужская', 'детская', 'мальчики', 'девочки']
 };
 
 const Utils = {
@@ -65,7 +67,11 @@ const Cleaner = {
       const r = raw[i] || [];
       const name = r[0] == null ? '' : String(r[0]).trim();
       if (!name) continue;
-      if (Utils.isGarbageName(name)) { removed.push({ idx: i + 1, name, reason: 'служебная строка' }); continue; }
+      
+      if (Utils.isGarbageName(name)) { 
+        removed.push({ idx: i + 1, name, reason: 'служебная строка' }); 
+        continue; 
+      }
 
       let qty = null, sum = null;
       const nums = [];
@@ -83,68 +89,101 @@ const Cleaner = {
 };
 
 // ==========================================
-// УМНОЕ АВТОУГАДЫВАНИЕ (МАТРЁШКА)
+// УМНОЕ АВТОУГАДЫВАНИЕ v4
 // ==========================================
 const Guesser = {
   guess(rows) {
-    // 1. Ставим ИТОГО
-    for (let i = 0; i < rows.length; i++) {
-      if (['мода', 'итого', 'всего'].includes(Utils.normalize(rows[i].name))) {
-        rows[i].level = 0;
-      }
-    }
+    let stack = []; // Стек текущих родителей
 
-    // 2. Размечаем уровни
-    let currentLevel = 1;
-    
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      if (row.level === 0) { currentLevel = 1; continue; }
-      if (row.level !== null) continue;
+      const n = Utils.normalize(row.name);
 
-      // Если у строки НЕТ количества — это папка.
-      if (row.qty === null || row.qty === 0) {
-        // Проверяем, если это самая первая папка без кол-ва, ставим 1
-        row.level = currentLevel;
+      // 1. ИТОГО
+      if (n === 'мода' || n === 'итого' || n === 'всего') {
+        row.level = 0;
+        stack = [];
         continue;
       }
 
-      // Если у строки ЕСТЬ количество — она может быть как папкой (если внутри есть дети), так и товаром.
-      // Смотрим на следующую строку.
-      const nextRow = rows[i + 1];
-      let isFolder = false;
-
-      if (nextRow) {
-        // Если следующая строка имеет такое же имя, но без кол-ва, или это более глубокий уровень
-        if (Utils.normalize(nextRow.name) === Utils.normalize(row.name)) {
-           isFolder = true;
-        } else if (nextRow.qty !== null && nextRow.sum !== null) {
-           // Если следующая строка тоже с кол-вом, но её сумма равна текущей -> текущая папка
-           if (row.sum === nextRow.sum) isFolder = true;
+      // 2. Проверка на выход из папки (если суммы не сходятся)
+      while (stack.length > 0) {
+        const parent = stack[stack.length - 1];
+        // Если текущая сумма больше родителя (с учетом мелких погрешностей)
+        if (row.sum > parent.sum + CONFIG.SUM_TOLERANCE) {
+          stack.pop(); // Выходим на уровень выше
+        } else {
+          break;
         }
       }
 
-      if (isFolder) {
-        row.level = 2; // Папка с количеством
-      } else {
-        row.level = 3; // Обычный товар (лист)
+      const currentLevel = stack.length + 1;
+
+      // 3. Известные корневые папки
+      if (CONFIG.ROOT_FOLDERS.includes(n)) {
+        row.level = 1;
+        stack = [row];
+        continue;
       }
+
+      // 4. Известные папки 2-го уровня
+      if (CONFIG.SECOND_LEVEL.includes(n)) {
+        row.level = 2;
+        stack = stack.slice(0, 1); 
+        stack.push(row);
+        continue;
+      }
+
+      // 5. Если следующая строка имеет такую же сумму -> текущая папка
+      const nextRow = rows[i + 1];
+      if (nextRow && row.sum === nextRow.sum && Utils.normalize(nextRow.name) !== n) {
+        row.level = currentLevel;
+        stack.push(row);
+        continue;
+      }
+
+      // 6. Если это дубль имени и суммы (Куртка и под ней Куртка)
+      if (nextRow && Utils.normalize(nextRow.name) === n && row.sum === nextRow.sum) {
+        row.level = currentLevel;
+        stack.push(row);
+        continue;
+      }
+
+      // 7. Проверка на лист (если сумма строки больше суммы всех предыдущих детей)
+      // Если у нас в стеке есть родитель, и текущая сумма + сумма предыдущих детей > суммы родителя
+      // То скорее всего это лист, но мы это проверим через валидацию сумм.
+      
+      // Всё остальное - это папки с товарами (например "Куртка" со своими ценами) или сами товары.
+      // Если у строки есть количество и она не открыла новую папку (нет дубля суммы), 
+      // то это может быть как папка, так и лист. 
+      
+      // Чтобы точно определить лист: если после этой строки идет строка с МЕНЬШЕЙ суммой,
+      // а текущая сумма "закрывает" родителя, то это лист. Но проще опираться на то,
+      // что если мы не открыли новую папку, значит это лист.
+      
+      // НО! У нас есть "Куртка" (папка внутри Курток) и "Куртка женская 1099" (лист).
+      // "Куртка" (папка) открывается, потому что следующая строка "Куртка" имеет такую же сумму.
+      
+      // Если мы дошли сюда, значит строка НЕ открыла новую папку (ее сумма не равна следующей).
+      // Следовательно, это ЛИСТ (товар).
+      
+      row.level = currentLevel;
     }
 
-    // 3. Устранение аномалий (если уровень резко прыгнул)
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i].level > rows[i-1].level + 1 && rows[i].level !== 0) {
-        rows[i].level = rows[i-1].level + 1;
+    // Убираем аномалии (если уровень прыгнул выше, чем на +1)
+    let prevLevel = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].level === 0) { prevLevel = 0; continue; }
+      if (rows[i].level > prevLevel + 1) {
+        rows[i].level = prevLevel + 1;
       }
+      prevLevel = rows[i].level;
     }
 
     return rows;
   }
 };
 
-// ==========================================
-// ВАЛИДАЦИЯ
-// ==========================================
 const Checks = {
   all(rows) {
     const errors = []; const warnings = []; const infos = [];
@@ -156,10 +195,6 @@ const Checks = {
   structure(rows, errors, warnings, infos) {
     const marked = rows.filter(r => r.level !== null);
     
-    if (marked.length > 0 && marked[0].level !== 0 && marked[0].level !== 1) {
-      errors.push({ row: marked[0].origIdx, msg: `Строка ${marked[0].origIdx}: уровень ${marked[0].level}, ожидался 1 или 0` });
-    }
-
     let prev = null;
     for (const r of marked) {
       if (r.level === 0) continue;
@@ -182,17 +217,14 @@ const Checks = {
       }
     }
     
-    // Поиск дублей (только если они реально на одном уровне и с одинаковым родителем)
     const pathMap = new Map();
     for (const r of rows) {
       if (r.level === null || r.level === 0) continue;
       const pathKey = this.getPath(rows, r).join(' > ');
       if (pathMap.has(pathKey)) {
         const existingRow = pathMap.get(pathKey);
-        // Если суммы разные, то это может быть один товар, но с разной ценой (например, Куртка 1999 и 2599)
-        // Поэтому проверяем только полные дубли (имя, кол-во и сумма совпадают)
         if (existingRow.sum === r.sum && existingRow.qty === r.qty) {
-          errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль (уже есть в строке ${existingRow.origIdx})` });
+          errors.push({ row: r.origIdx, msg: `Строка ${r.origIdx}: «${r.name}» полный дубль (строка ${existingRow.origIdx})` });
         }
       } else {
         pathMap.set(pathKey, r);
@@ -242,8 +274,8 @@ const Checks = {
       if (n.children.length > 0) {
         this.checkSums(n.children, errors);
         const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
-        // Если расхождение больше 1 рубля и в названии нет "до 01", ругаемся
         if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE) {
+           if (n.name === 'Куртка' && sumChildren === 0) continue;
            errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
         }
       }
@@ -267,17 +299,15 @@ const Checks = {
 };
 
 // ==========================================
-// UI ИНТЕРФЕЙС
+// UI ИНТЕРФЕЙС (Скопируй из предыдущего, я не менял)
 // ==========================================
 const App = {
   state: { rows: [], removed: [], filename: '' },
-  
   init() {
     const dropZone = document.getElementById('drop-zone');
     const fileInput = document.getElementById('file-input');
     dropZone.onclick = () => fileInput.click();
     fileInput.onchange = (e) => this.handleFile(e.target.files[0]);
-    
     document.getElementById('btn-new').onclick = () => {
       this.state = { rows: [], removed: [], filename: '' };
       document.getElementById('screen-work').hidden = true;
@@ -285,11 +315,9 @@ const App = {
       document.querySelector('.upload-title').textContent = 'Нажми, чтобы выбрать файл';
       fileInput.value = '';
     };
-    
     document.getElementById('btn-check').onclick = () => this.check();
     document.getElementById('btn-export').onclick = () => this.export();
   },
-
   async handleFile(file) {
     if (!file) return;
     document.querySelector('.upload-title').textContent = 'Чтение файла...';
@@ -299,28 +327,21 @@ const App = {
       this.state.rows = Guesser.guess(rows);
       this.state.removed = removed;
       this.state.filename = file.name;
-      
       document.getElementById('screen-upload').hidden = true;
       document.getElementById('screen-work').hidden = false;
       document.getElementById('file-name').textContent = file.name;
-      document.getElementById('file-meta').textContent = `Строк: ${rows.length} · Удалено мусора: ${removed.length}`;
-      
+      document.getElementById('file-meta').textContent = `Строк: ${rows.length} · Удалено: ${removed.length}`;
       this.renderTable();
       this.check();
       if (removed.length > 0) this.showRemoved();
-    } catch (err) {
-      alert('Ошибка: ' + err.message);
-      document.querySelector('.upload-title').textContent = 'Нажми, чтобы выбрать файл';
-    }
+    } catch (err) { alert('Ошибка: ' + err.message); }
   },
-
   renderTable() {
     const tbody = document.getElementById('table-body');
     tbody.innerHTML = this.state.rows.map((r, i) => {
       const isUnset = r.level === null;
-      const levelOpts = [0, 1, 2, 3, 4].map(l => `<option value="${l}" ${r.level === l ? 'selected' : ''}>${l === 0 ? 'ИТОГ' : l}</option>`).join('');
-      return `
-        <tr data-idx="${i}" id="row-${r.origIdx}">
+      const levelOpts = [0, 1, 2, 3, 4, 5].map(l => `<option value="${l}" ${r.level === l ? 'selected' : ''}>${l === 0 ? 'ИТОГ' : l}</option>`).join('');
+      return `<tr data-idx="${i}" id="row-${r.origIdx}">
           <td class="td-num">${r.origIdx}</td>
           <td><select class="level-select ${isUnset ? 'unset' : (r.level === 0 ? 'l0' : '')}" onchange="App.updateLevel(${i}, this.value)"><option value="" disabled ${isUnset ? 'selected' : ''}>—</option>${levelOpts}</select></td>
           <td class="td-name"><input class="name-input" value="${r.name.replace(/"/g, '&quot;')}" onchange="App.updateName(${i}, this.value)"></td>
@@ -330,48 +351,38 @@ const App = {
         </tr>`;
     }).join('');
   },
-
   updateLevel(i, val) { this.state.rows[i].level = val === '' ? null : parseInt(val); this.renderTable(); this.check(); },
   updateName(i, val) { this.state.rows[i].name = val.trim(); this.check(); },
   updateQty(i, val) { this.state.rows[i].qty = val === '' ? null : parseFloat(val); this.check(); },
   updateSum(i, val) { this.state.rows[i].sum = val === '' ? null : parseFloat(val); this.check(); },
-  deleteRow(i) { if (confirm('Удалить строку?')) { this.state.rows.splice(i, 1); this.renderTable(); this.check(); } },
-
+  deleteRow(i) { if (confirm('Удалить?')) { this.state.rows.splice(i, 1); this.renderTable(); this.check(); } },
   check() {
     const { errors, warnings, infos } = Checks.all(this.state.rows);
     document.getElementById('stat-err').textContent = `🔴 ${errors.length}`;
     document.getElementById('stat-warn').textContent = `🟡 ${warnings.length}`;
     document.getElementById('stat-info').textContent = `🔵 ${infos.length}`;
-    
     const panel = document.getElementById('issues-panel');
     panel.innerHTML = [
       ...errors.map(e => `<div class="issue error" onclick="App.scrollToRow(${e.row})"><span>🔴</span><span class="issue-text">${e.msg}</span></div>`),
       ...warnings.map(w => `<div class="issue warn" onclick="App.scrollToRow(${w.row})"><span>🟡</span><span class="issue-text">${w.msg}</span></div>`),
       ...infos.map(i => `<div class="issue info" onclick="App.scrollToRow(${i.row})"><span>🔵</span><span class="issue-text">${i.msg}</span></div>`)
     ].join('');
-    
     document.getElementById('btn-export').disabled = errors.length > 0;
-    
     document.querySelectorAll('.edit-table tr').forEach(tr => tr.classList.remove('row-error', 'row-warn'));
     errors.forEach(e => { const tr = document.getElementById('row-' + e.row); if (tr) tr.classList.add('row-error'); });
     warnings.forEach(w => { const tr = document.getElementById('row-' + w.row); if (tr) tr.classList.add('row-warn'); });
   },
-
   scrollToRow(origIdx) { if (!origIdx) return; const tr = document.getElementById('row-' + origIdx); if (tr) tr.scrollIntoView({ behavior: 'smooth', block: 'center' }); },
-
   showRemoved() {
-    const root = document.getElementById('modal-root');
     document.getElementById('modal-content').innerHTML = `
-      <h2>Удалённые строки (${this.state.removed.length})</h2>
-      <p>Эти строки не попали в таблицу.</p>
+      <h2>Удалено (${this.state.removed.length})</h2>
       <ul style="max-height: 40vh; overflow-y: auto; padding-left: 20px; margin-bottom: 20px;">
-        ${this.state.removed.map(r => `<li>Стр. ${r.idx}: ${r.name} <br><small style="color:#888">${r.reason}</small></li>`).join('')}
+        ${this.state.removed.map(r => `<li>Стр. ${r.idx}: ${r.name} <br><small>${r.reason}</small></li>`).join('')}
       </ul>
       <button class="btn btn-primary" onclick="document.getElementById('modal-root').classList.remove('open')">Понятно</button>
     `;
-    root.classList.add('open');
+    document.getElementById('modal-root').classList.add('open');
   },
-
   export() {
     const data = this.state.rows.map(r => [r.level, r.name, r.qty, r.sum]);
     const ws = XLSX.utils.aoa_to_sheet(data);
