@@ -1,5 +1,5 @@
 // ==========================================
-// НОРМАЛИЗАТОР 1С — v4.1 (Исправленная)
+// НОРМАЛИЗАТОР 1С — v4.2 (Финальный)
 // ==========================================
 
 const CONFIG = {
@@ -94,9 +94,6 @@ const Cleaner = {
   }
 };
 
-// ==========================================
-// УМНОЕ АВТОУГАДЫВАНИЕ v4 (Математическое)
-// ==========================================
 const Guesser = {
   guess(rows) {
     let stack = []; 
@@ -105,14 +102,15 @@ const Guesser = {
       const row = rows[i];
       const n = Utils.normalize(row.name);
 
-      // 1. ИТОГО
-      if (n === 'мода' || n === 'итого' || n === 'всего') {
-        row.level = 0;
-        stack = [];
-        continue;
+      // Строгое определение ИТОГА (только если это первая строка)
+      if (i === 0 || (i === 1 && rows[0].level === 0)) {
+        if (n === 'мода' || n === 'итого' || n === 'всего') {
+          row.level = 0;
+          stack = [];
+          continue;
+        }
       }
 
-      // 2. Выход из папки (если сумма больше родителя)
       while (stack.length > 0) {
         const parent = stack[stack.length - 1];
         if (row.sum > parent.sum + CONFIG.SUM_TOLERANCE) {
@@ -124,14 +122,12 @@ const Guesser = {
 
       const currentLevel = stack.length + 1;
 
-      // 3. Корневые папки
       if (CONFIG.ROOT_FOLDERS.includes(n)) {
         row.level = 1;
         stack = [row];
         continue;
       }
 
-      // 4. Папки 2-го уровня
       if (CONFIG.SECOND_LEVEL.includes(n)) {
         row.level = 2;
         stack = stack.slice(0, 1); 
@@ -139,7 +135,6 @@ const Guesser = {
         continue;
       }
 
-      // 5. Открытие новой папки (сумма равна следующей)
       const nextRow = rows[i + 1];
       if (nextRow && row.sum === nextRow.sum && Utils.normalize(nextRow.name) !== n) {
         row.level = currentLevel;
@@ -147,18 +142,15 @@ const Guesser = {
         continue;
       }
 
-      // 6. Дубль-папка
       if (nextRow && Utils.normalize(nextRow.name) === n && row.sum === nextRow.sum) {
         row.level = currentLevel;
         stack.push(row);
         continue;
       }
 
-      // 7. Иначе это ЛИСТ (товар)
       row.level = currentLevel;
     }
 
-    // Защита от прыжков уровней
     let prevLevel = 0;
     for (let i = 0; i < rows.length; i++) {
       if (rows[i].level === 0) { prevLevel = 0; continue; }
@@ -224,6 +216,10 @@ const Checks = {
     const groups = new Map();
     for (const r of rows) {
       if (r.level === null || r.level === 0) continue;
+      
+      // Если в названии есть цифры (цена), пропускаем проверку на опечатки
+      if (/\d/.test(r.name)) continue; 
+
       const key = this.getPath(rows, r).slice(0, -1).join(' > ') + '||' + r.level;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(r);
@@ -237,6 +233,7 @@ const Checks = {
           if (na === nb) continue;
           const dist = Utils.levenshtein(na, nb);
           const threshold = Math.min(na.length, nb.length) < 5 ? CONFIG.LEVENSHTEIN_SHORT : CONFIG.LEVENSHTEIN_LONG;
+          
           if (dist <= threshold && Math.abs(na.length - nb.length) <= 1) {
             warnings.push({ row: b.origIdx, msg: `Строка ${b.origIdx}: «${b.name}» похоже на «${a.name}» (опечатка?)` });
           }
@@ -262,8 +259,11 @@ const Checks = {
       if (n.children.length > 0) {
         this.checkSums(n.children, errors);
         const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
-        if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE) {
-           if (n.name === 'Куртка' && sumChildren === 0) continue; // пропускаем дубль
+        
+        // Игнорируем расхождения для строк, где есть слово "до" или "( до" (это дубли папок)
+        const isDummyFolder = /\(до|\( до|до \d/.test(n.name);
+
+        if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE && !isDummyFolder) {
            errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
         }
       }
