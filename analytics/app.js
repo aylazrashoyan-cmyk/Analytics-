@@ -1,5 +1,5 @@
 /* ==========================================
-   APP ROUTER
+   APP.JS - ЕДИНЫЙ ДВИЖОК ПРИЛОЖЕНИЯ
    ========================================== */
 
 const App = {
@@ -39,10 +39,7 @@ const App = {
   renderHeader() {
     const header = document.getElementById('app-header');
     const store = DB.getCurrentStore();
-    if (!store) {
-      header.innerHTML = '';
-      return;
-    }
+    if (!store) { header.innerHTML = ''; return; }
     header.innerHTML = `
       <button class="store-switch" id="store-switch">
         <span>🏬 ${UI.escape(store.name)}</span>
@@ -50,9 +47,7 @@ const App = {
       </button>
       <div style="width: 40px"></div>
     `;
-    document.getElementById('store-switch').addEventListener('click', () => {
-      this.openStoreSwitcher();
-    });
+    document.getElementById('store-switch').addEventListener('click', () => this.openStoreSwitcher());
   },
 
   openStoreSwitcher() {
@@ -80,10 +75,7 @@ const App = {
   renderNav() {
     const store = DB.getCurrentStore();
     const nav = document.getElementById('nav');
-    if (!store) {
-      nav.innerHTML = '';
-      return;
-    }
+    if (!store) { nav.innerHTML = ''; return; }
     nav.innerHTML = this.nav.map(n => `
       <a class="nav-item ${this.screen === n.id ? 'active' : ''}" data-screen="${n.id}">
         ${this.icons[n.icon]}
@@ -100,19 +92,15 @@ const App = {
     this.renderNav();
     const root = document.getElementById('screen');
     root.innerHTML = '';
-
     const store = DB.getCurrentStore();
-    if (!store && screen !== 'stores') {
-      this.route('stores');
-      return;
-    }
+    if (!store && screen !== 'stores') { this.route('stores'); return; }
 
     try {
-      if (screen === 'stores' && Screens.stores) await Screens.stores(root);
-      if (screen === 'home' && Screens.home) await Screens.home(root);
-      if (screen === 'analytics' && Screens.analytics) await Screens.analytics(root);
-      if (screen === 'rails' && Screens.rails) await Screens.rails(root);
-      if (screen === 'settings' && Screens.settings) await Screens.settings(root);
+      if (screen === 'stores') await Screens.stores(root);
+      if (screen === 'home') await Screens.home(root);
+      if (screen === 'analytics') await Screens.analytics(root);
+      if (screen === 'rails') await Screens.rails(root);
+      if (screen === 'settings') await Screens.settings(root);
     } catch (err) {
       console.error('Route error:', err);
       root.innerHTML = `<div class="empty-state"><h2>Ошибка экрана</h2><p>${UI.escape(err.message)}</p></div>`;
@@ -142,5 +130,237 @@ const UI = {
   fmtPct(n) { return (n || 0).toFixed(1) + '%'; },
 };
 
+// ==========================================
+// ЭКРАНЫ ПРИЛОЖЕНИЯ (ВШИТЫ СЮДА)
+// ==========================================
+const Screens = {};
+
+// 1. МАГАЗИНЫ
+Screens.stores = async function(root) {
+  const stores = DB.getStores();
+  const current = DB.getCurrentStore();
+
+  root.innerHTML = `
+    <div class="header">
+      <h1 class="h1">Магазины</h1>
+      <button class="header-btn" id="btn-add-store">+</button>
+    </div>
+    ${stores.length ? stores.map(s => `
+      <div class="card" style="display:flex;justify-content:space-between;align-items:center;padding:16px 20px">
+        <div style="flex:1;cursor:pointer" data-store-id="${s.id}">
+          <div class="item-name">${UI.escape(s.name)} ${s.id === current?.id ? '<span class="tag ok" style="margin-left:8px">текущий</span>' : ''}</div>
+          <div class="item-desc">Добавлен ${new Date(s.createdAt).toLocaleDateString('ru-RU')}</div>
+        </div>
+        <button class="header-btn" data-delete-store="${s.id}" style="color:var(--danger)">🗑</button>
+      </div>
+    `).join('') : `
+      <div class="card empty-state"><h2>Нет магазинов</h2><p>Добавь первый магазин, чтобы начать</p></div>
+    `}
+    <button class="btn btn-primary" id="btn-add-store-2" style="margin-top:8px">+ Добавить магазин</button>
+  `;
+
+  const openAdd = () => {
+    UI.modal(`
+      <div class="modal-title">Новый магазин</div>
+      <input type="text" class="input" id="new-store-name" placeholder="Название магазина" autofocus>
+      <button class="btn btn-primary" style="margin-top:16px" id="btn-save-store">Сохранить</button>
+      <button class="btn btn-secondary" style="margin-top:8px" onclick="UI.closeModal()">Отмена</button>
+    `);
+    setTimeout(() => document.getElementById('new-store-name')?.focus(), 100);
+    document.getElementById('btn-save-store').addEventListener('click', async () => {
+      const name = document.getElementById('new-store-name').value.trim();
+      if (!name) { UI.toast('Введи название', 'error'); return; }
+      await DB.addStore(name);
+      UI.closeModal();
+      UI.toast('Магазин добавлен');
+      App.renderHeader();
+      App.route('stores');
+    });
+  };
+
+  document.getElementById('btn-add-store').addEventListener('click', openAdd);
+  document.getElementById('btn-add-store-2').addEventListener('click', openAdd);
+
+  root.querySelectorAll('[data-store-id]').forEach(el => {
+    el.addEventListener('click', async () => {
+      await DB.setCurrentStore(el.dataset.storeId);
+      App.renderHeader();
+      UI.toast('Магазин выбран');
+      App.route('home');
+    });
+  });
+
+  root.querySelectorAll('[data-delete-store]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const id = el.dataset.deleteStore;
+      const store = stores.find(s => s.id === id);
+      UI.modal(`
+        <div class="modal-title">Удалить магазин?</div>
+        <div class="modal-text">«${UI.escape(store.name)}» и все его данные будут удалены.</div>
+        <button class="btn btn-danger" id="btn-confirm-delete">Удалить</button>
+        <button class="btn btn-secondary" style="margin-top:8px" onclick="UI.closeModal()">Отмена</button>
+      `);
+      document.getElementById('btn-confirm-delete').addEventListener('click', async () => {
+        await DB.deleteStore(id);
+        UI.closeModal();
+        UI.toast('Магазин удалён');
+        App.renderHeader();
+        App.route('stores');
+      });
+    });
+  });
+};
+
+// 2. ГЛАВНАЯ
+Screens.home = async function(root) {
+  const store = DB.getCurrentStore();
+  const current = DB.getCurrentImport(store.id);
+
+  if (!current) {
+    root.innerHTML = `
+      <div class="header"><h1 class="h1">Главная</h1></div>
+      <div class="card empty-state">
+        <h2>Нет данных</h2>
+        <p>Загрузите Excel-файл, который мы сделали в нормализаторе</p>
+        <input type="file" id="file-upload" accept=".xlsx" style="display:none">
+        <button class="btn btn-primary" id="btn-upload">Загрузить Excel</button>
+      </div>
+    `;
+    setupUpload(root);
+    return;
+  }
+
+  const planKey = current.periodStart ? current.periodStart.slice(0, 7) : current.date.slice(0, 7);
+  const plan = DB.getPlan(store.id, planKey);
+  const planPct = plan > 0 ? Math.min(100, (current.totalSum / plan) * 100) : 0;
+  
+  root.innerHTML = `
+    <div class="header">
+      <div>
+        <h1 class="h1">Главная</h1>
+        <div class="subtitle">${current.periodLabel} · ${current.periodDays} дн.</div>
+      </div>
+      <div class="tag ${current.valid ? 'ok' : 'err'}">${current.valid ? 'ОК' : 'Ошибка'}</div>
+    </div>
+    <div class="card hero-card">
+      <div class="card-title">Выручка магазина</div>
+      <div class="hero-val num">${UI.fmt(current.totalSum)} ₽</div>
+      <div class="hero-meta">
+        <span>План: ${plan > 0 ? UI.fmt(plan) + ' ₽' : 'не задан'}</span>
+        <span>${plan > 0 ? Math.round((current.totalSum / plan) * 100) + '%' : ''}</span>
+      </div>
+      <div class="progress-wrap"><div class="progress-bar" style="width:${planPct}%"></div></div>
+      <div class="hero-meta" style="margin-top:10px"><span>Ср. чек: <b>${UI.fmt(current.avgCheck)} ₽</b></span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Управление данными</div>
+      <input type="file" id="file-upload" accept=".xlsx" style="display:none">
+      <button class="btn btn-secondary" id="btn-upload">Загрузить новый Excel</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Дерево категорий (Топ-10)</div>
+      ${renderTopCategories(current.roots)}
+    </div>
+  `;
+  setupUpload(root);
+};
+
+function renderTopCategories(roots) {
+  if (!roots || !roots.length) return '<p class="item-desc">Нет данных</p>';
+  return roots.slice(0, 10).map(r => `
+    <div class="list-item">
+      <div><div class="item-name">${UI.escape(r.name)}</div><div class="item-desc">${r.children ? r.children.length : 0} вложенных</div></div>
+      <div class="item-val num">${UI.fmt(r.sum)} ₽</div>
+    </div>
+  `).join('');
+}
+
+function setupUpload(root) {
+  const fileInput = root.querySelector('#file-upload');
+  const btnUpload = root.querySelector('#btn-upload');
+  if (!btnUpload) return;
+  btnUpload.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    UI.toast('Читаю файл...');
+    try {
+      const store = DB.getCurrentStore();
+      const imp = await Parser.parse(file, store.id);
+      if (!imp.valid && imp.errorMsg) {
+        UI.toast(`Ошибка: итог ${imp.errorMsg.control} ≠ сумма ${imp.errorMsg.roots}`, 'error');
+      } else {
+        await DB.addImport(imp);
+        UI.toast('Файл загружен!');
+        App.route('home');
+      }
+    } catch (err) { UI.toast('Ошибка парсинга файла', 'error'); }
+  });
+}
+
+// 3. АНАЛИТИКА (Заглушка)
+Screens.analytics = async function(root) {
+  root.innerHTML = `
+    <div class="header"><h1 class="h1">Аналитика</h1></div>
+    <div class="card empty-state"><h2>В разработке</h2><p>Здесь будет ABC-анализ и рекомендации.</p></div>
+  `;
+};
+
+// 4. РЕЙЛЫ (Заглушка)
+Screens.rails = async function(root) {
+  root.innerHTML = `
+    <div class="header"><h1 class="h1">Рейлы</h1></div>
+    <div class="card empty-state"><h2>В разработке</h2><p>Здесь будет настройка рядов и привязка товаров.</p></div>
+  `;
+};
+
+// 5. НАСТРОЙКИ
+Screens.settings = async function(root) {
+  const store = DB.getCurrentStore();
+  const current = DB.getCurrentImport(store.id);
+  const planKey = current?.periodStart ? current.periodStart.slice(0, 7) : new Date().toISOString().slice(0, 7);
+  const currentPlan = DB.getPlan(store.id, planKey);
+
+  root.innerHTML = `
+    <div class="header"><h1 class="h1">Настройки</h1></div>
+    <div class="card">
+      <div class="card-title">План на месяц (${planKey})</div>
+      <div class="input-group">
+        <input type="number" class="input" id="plan-input" placeholder="Например, 1000000" value="${currentPlan || ''}">
+        <button class="btn btn-primary" style="width:auto" id="btn-save-plan">OK</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Данные магазина</div>
+      <p class="item-desc" style="margin-bottom:12px">Загружено файлов: ${DB.getImports(store.id).length}</p>
+      <button class="btn btn-danger" id="btn-clear">Очистить все данные</button>
+    </div>
+  `;
+
+  document.getElementById('btn-save-plan').addEventListener('click', async () => {
+    const val = parseFloat(document.getElementById('plan-input').value) || 0;
+    await DB.setPlan(store.id, planKey, val);
+    UI.toast('План сохранён');
+    App.route('home');
+  });
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    UI.modal(`
+      <div class="modal-title">Очистить данные?</div>
+      <div class="modal-text">Все загруженные Excel-файлы будут удалены.</div>
+      <button class="btn btn-danger" id="btn-confirm-clear">Да, удалить</button>
+      <button class="btn btn-secondary" style="margin-top:8px" onclick="UI.closeModal()">Отмена</button>
+    `);
+    document.getElementById('btn-confirm-clear').addEventListener('click', async () => {
+      await DB.clearImports(store.id);
+      UI.closeModal();
+      UI.toast('Данные очищены');
+      App.route('home');
+    });
+  });
+};
+
 window.App = App;
 window.UI = UI;
+window.Screens = Screens;
