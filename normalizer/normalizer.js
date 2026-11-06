@@ -1,5 +1,5 @@
 // ==========================================
-// НОРМАЛИЗАТОР 1С — v4.0 (Математическое дерево)
+// НОРМАЛИЗАТОР 1С — v4.1 (Исправленная)
 // ==========================================
 
 const CONFIG = {
@@ -25,6 +25,12 @@ const Utils = {
   hasInvisible(s) { return /[\u00A0\u200B\uFEFF\u2007\u202F]/.test(String(s || '')); },
   hasTrailingSpace(s) { return /^\s|\s$/.test(String(s || '')); },
   hasDoubleSpace(s) { return /\s{2,}/.test(String(s || '')); },
+  
+  isGarbageName(name) {
+    const n = Utils.normalize(name);
+    return CONFIG.GARBAGE_NAMES.some(g => n === g || n.startsWith(g + ' ') || n.startsWith(g + ':'));
+  },
+
   levenshtein(a, b) {
     a = String(a || ''); b = String(b || '');
     if (a === b) return 0;
@@ -89,11 +95,11 @@ const Cleaner = {
 };
 
 // ==========================================
-// УМНОЕ АВТОУГАДЫВАНИЕ v4
+// УМНОЕ АВТОУГАДЫВАНИЕ v4 (Математическое)
 // ==========================================
 const Guesser = {
   guess(rows) {
-    let stack = []; // Стек текущих родителей
+    let stack = []; 
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -106,12 +112,11 @@ const Guesser = {
         continue;
       }
 
-      // 2. Проверка на выход из папки (если суммы не сходятся)
+      // 2. Выход из папки (если сумма больше родителя)
       while (stack.length > 0) {
         const parent = stack[stack.length - 1];
-        // Если текущая сумма больше родителя (с учетом мелких погрешностей)
         if (row.sum > parent.sum + CONFIG.SUM_TOLERANCE) {
-          stack.pop(); // Выходим на уровень выше
+          stack.pop(); 
         } else {
           break;
         }
@@ -119,14 +124,14 @@ const Guesser = {
 
       const currentLevel = stack.length + 1;
 
-      // 3. Известные корневые папки
+      // 3. Корневые папки
       if (CONFIG.ROOT_FOLDERS.includes(n)) {
         row.level = 1;
         stack = [row];
         continue;
       }
 
-      // 4. Известные папки 2-го уровня
+      // 4. Папки 2-го уровня
       if (CONFIG.SECOND_LEVEL.includes(n)) {
         row.level = 2;
         stack = stack.slice(0, 1); 
@@ -134,7 +139,7 @@ const Guesser = {
         continue;
       }
 
-      // 5. Если следующая строка имеет такую же сумму -> текущая папка
+      // 5. Открытие новой папки (сумма равна следующей)
       const nextRow = rows[i + 1];
       if (nextRow && row.sum === nextRow.sum && Utils.normalize(nextRow.name) !== n) {
         row.level = currentLevel;
@@ -142,35 +147,18 @@ const Guesser = {
         continue;
       }
 
-      // 6. Если это дубль имени и суммы (Куртка и под ней Куртка)
+      // 6. Дубль-папка
       if (nextRow && Utils.normalize(nextRow.name) === n && row.sum === nextRow.sum) {
         row.level = currentLevel;
         stack.push(row);
         continue;
       }
 
-      // 7. Проверка на лист (если сумма строки больше суммы всех предыдущих детей)
-      // Если у нас в стеке есть родитель, и текущая сумма + сумма предыдущих детей > суммы родителя
-      // То скорее всего это лист, но мы это проверим через валидацию сумм.
-      
-      // Всё остальное - это папки с товарами (например "Куртка" со своими ценами) или сами товары.
-      // Если у строки есть количество и она не открыла новую папку (нет дубля суммы), 
-      // то это может быть как папка, так и лист. 
-      
-      // Чтобы точно определить лист: если после этой строки идет строка с МЕНЬШЕЙ суммой,
-      // а текущая сумма "закрывает" родителя, то это лист. Но проще опираться на то,
-      // что если мы не открыли новую папку, значит это лист.
-      
-      // НО! У нас есть "Куртка" (папка внутри Курток) и "Куртка женская 1099" (лист).
-      // "Куртка" (папка) открывается, потому что следующая строка "Куртка" имеет такую же сумму.
-      
-      // Если мы дошли сюда, значит строка НЕ открыла новую папку (ее сумма не равна следующей).
-      // Следовательно, это ЛИСТ (товар).
-      
+      // 7. Иначе это ЛИСТ (товар)
       row.level = currentLevel;
     }
 
-    // Убираем аномалии (если уровень прыгнул выше, чем на +1)
+    // Защита от прыжков уровней
     let prevLevel = 0;
     for (let i = 0; i < rows.length; i++) {
       if (rows[i].level === 0) { prevLevel = 0; continue; }
@@ -275,7 +263,7 @@ const Checks = {
         this.checkSums(n.children, errors);
         const sumChildren = n.children.reduce((s, c) => s + (c.sum || 0), 0);
         if (Math.abs(sumChildren - (n.sum || 0)) > CONFIG.SUM_TOLERANCE) {
-           if (n.name === 'Куртка' && sumChildren === 0) continue;
+           if (n.name === 'Куртка' && sumChildren === 0) continue; // пропускаем дубль
            errors.push({ row: n.origIdx, msg: `«${n.name}»: сумма ${n.sum}, а сумма детей ${sumChildren}` });
         }
       }
@@ -299,7 +287,7 @@ const Checks = {
 };
 
 // ==========================================
-// UI ИНТЕРФЕЙС (Скопируй из предыдущего, я не менял)
+// UI ИНТЕРФЕЙС
 // ==========================================
 const App = {
   state: { rows: [], removed: [], filename: '' },
